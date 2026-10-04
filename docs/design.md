@@ -276,6 +276,13 @@ Components:
 
 ## 10. Connection pool and 5xx rules
 
+| Environment | Maximum Pool Size | Db__GateSize | Postgres max_connections |
+|---|---|---|---|
+| Aiven free (testing) | 8 | 6 | 15 |
+| Compose or own VM (graders, live) | 30 | 24 | 200 (set in compose) |
+
+> **Note:** All of these values are configuration (connection string and `Db__GateSize` environment variable), never hard-coded.
+
 Connection string (dev):
 `Host=localhost;Port=5432;Database=seats;Username=app;Password=app;Minimum Pool Size=10;Maximum Pool Size=30;Keepalive=15;Connection Idle Lifetime=300;Timeout=60;Command Timeout=30`
 

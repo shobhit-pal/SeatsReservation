@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
+using SeatApi.Models;
 using SeatApi.Repositories;
 using SeatApi.Services;
 
@@ -34,6 +35,20 @@ var jwtSecret = builder.Configuration["Jwt:Secret"]
 if (jwtSecret.Length < 32)
 {
     throw new InvalidOperationException("Jwt__Secret must be at least 32 characters.");
+}
+
+// ---------------------------------------------------------------------------
+// 2.1. DbOptions (Options pattern) and connection pool / gate validation
+// ---------------------------------------------------------------------------
+builder.Services.Configure<DbOptions>(builder.Configuration.GetSection(DbOptions.SectionName));
+
+var dbOptions = new DbOptions();
+builder.Configuration.GetSection(DbOptions.SectionName).Bind(dbOptions);
+
+var csBuilder = new NpgsqlConnectionStringBuilder(connectionString);
+if (dbOptions.GateSize >= csBuilder.MaxPoolSize || dbOptions.GateSize < 1)
+{
+    throw new InvalidOperationException("Db__GateSize must be at least 1 and less than Maximum Pool Size");
 }
 
 // ---------------------------------------------------------------------------
@@ -128,9 +143,13 @@ builder.Services.AddAuthorization(options =>
 });
 
 // ---------------------------------------------------------------------------
-// 7. Build the app
+// 7. Build the app and log pool diagnostic line
 // ---------------------------------------------------------------------------
 var app = builder.Build();
+
+app.Logger.LogInformation(
+    "Database pool configured: MinPoolSize={MinPool}, MaxPoolSize={MaxPool}, GateSize={GateSize}",
+    csBuilder.MinPoolSize, csBuilder.MaxPoolSize, dbOptions.GateSize);
 
 // ---------------------------------------------------------------------------
 // 8. Middleware & Endpoints
