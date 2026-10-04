@@ -18,6 +18,7 @@ Read `docs/design.md` before any task. It is the spec.
 - Locals and parameters: camelCase. Private fields: _camelCase.
 - Async methods end with Async.
 - DB tables and columns are snake_case.
+- **One public class (or interface, or record, or enum) per file. The filename must match the type name exactly** (e.g. `AuthRequest` lives in `AuthRequest.cs`). Never bundle multiple public types in one file.
 
 ## Design
 - SOLID: one responsibility per class. Depend on interfaces, wire them with DI.
