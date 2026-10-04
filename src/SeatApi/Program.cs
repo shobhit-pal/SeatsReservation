@@ -3,14 +3,17 @@
 
 using System.Text;
 using System.Text.Json;
+using Dapper;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
+using SeatApi.Middleware;
 using SeatApi.Models;
 using SeatApi.Repositories;
 using SeatApi.Services;
 using SeatApi.Services.Cache;
+using SeatApi.Services.Resilience;
 
 // ---------------------------------------------------------------------------
 // 1. Load .env before CreateBuilder so IConfiguration sees the values.
@@ -53,7 +56,7 @@ if (dbOptions.GateSize >= csBuilder.MaxPoolSize || dbOptions.GateSize < 1)
 }
 
 // ---------------------------------------------------------------------------
-// 3. Thread-pool and body-size tuning (design.md §10)
+// 3. Thread-pool and body-size / connection tuning (design.md §10)
 // ---------------------------------------------------------------------------
 ThreadPool.SetMinThreads(200, 200);
 
@@ -61,6 +64,9 @@ builder.WebHost.ConfigureKestrel(opts =>
 {
     // Limit request bodies to 4 MB (design.md §10)
     opts.Limits.MaxRequestBodySize = 4_000_000;
+    opts.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+    opts.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(120);
+    opts.Limits.MaxConcurrentConnections = null;
 });
 
 // ---------------------------------------------------------------------------
@@ -95,6 +101,12 @@ builder.Services
 // ---------------------------------------------------------------------------
 var dataSource = NpgsqlDataSource.Create(connectionString);
 builder.Services.AddSingleton(dataSource);
+
+// ---------------------------------------------------------------------------
+// 6.3. Resilience services (Retry, Observers)
+// ---------------------------------------------------------------------------
+builder.Services.AddSingleton<IDbRetryObserver, NoOpDbRetryObserver>();
+builder.Services.AddSingleton<ITransientRetry, TransientRetry>();
 
 // ---------------------------------------------------------------------------
 // 6.4. In-memory layer singletons (ShowCache, TakenFilter, KeyCache, SeatLockManager, DbGate)
@@ -170,12 +182,14 @@ builder.Services.AddAuthorization(options =>
 var app = builder.Build();
 
 app.Logger.LogInformation(
-    "Database pool configured: MinPoolSize={MinPool}, MaxPoolSize={MaxPool}, GateSize={GateSize}",
-    csBuilder.MinPoolSize, csBuilder.MaxPoolSize, dbOptions.GateSize);
+    "Database pool configured: MinPoolSize={MinPool}, MaxPoolSize={MaxPool}, GateSize={GateSize}, RetryWindowSeconds={RetryWindow}",
+    csBuilder.MinPoolSize, csBuilder.MaxPoolSize, dbOptions.GateSize, dbOptions.RetryWindowSeconds);
 
 // ---------------------------------------------------------------------------
 // 8. Middleware & Endpoints
 // ---------------------------------------------------------------------------
+
+app.UseMiddleware<ErrorHandlingMiddleware>();
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -183,12 +197,56 @@ app.UseAuthorization();
 // Liveness probe — no DB dependency (design.md §4.6)
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 
-// Readiness probe — checks warm-up completion
-app.MapGet("/health/ready", (WarmupService warmup) =>
-    warmup.IsWarm ? Results.Ok(new { status = "ready" }) : Results.StatusCode(503));
+// Readiness probe — checks warm-up completion and live DB connection (cached for 1s)
+var lastSelect1TimeUtc = DateTime.MinValue;
+var lastSelect1Success = false;
+var select1Lock = new object();
 
-// Controllers will be mapped in later commits (auth, shows, reservations)
+app.MapGet("/health/ready", async (WarmupService warmup, NpgsqlDataSource db) =>
+{
+    if (!warmup.IsWarm)
+    {
+        return Results.Json(new { status = "not-ready", reason = "warming-up" }, statusCode: 503);
+    }
+
+    lock (select1Lock)
+    {
+        if (DateTime.UtcNow - lastSelect1TimeUtc < TimeSpan.FromSeconds(1))
+        {
+            return lastSelect1Success
+                ? Results.Ok(new { status = "ready" })
+                : Results.Json(new { status = "not-ready", reason = "db-unreachable" }, statusCode: 503);
+        }
+    }
+
+    try
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await using var conn = await db.OpenConnectionAsync(cts.Token);
+        // Validates database connectivity for readiness probe
+        await conn.ExecuteScalarAsync<int>(new CommandDefinition("SELECT 1;", cancellationToken: cts.Token));
+
+        lock (select1Lock)
+        {
+            lastSelect1Success = true;
+            lastSelect1TimeUtc = DateTime.UtcNow;
+        }
+
+        return Results.Ok(new { status = "ready" });
+    }
+    catch
+    {
+        lock (select1Lock)
+        {
+            lastSelect1Success = false;
+            lastSelect1TimeUtc = DateTime.UtcNow;
+        }
+
+        return Results.Json(new { status = "not-ready", reason = "db-unreachable" }, statusCode: 503);
+    }
+});
+
+// Controllers
 app.MapControllers();
 
 app.Run();
-

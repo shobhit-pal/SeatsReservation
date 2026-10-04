@@ -3,6 +3,7 @@ using System.Text;
 using SeatApi.Models;
 using SeatApi.Repositories;
 using SeatApi.Services.Cache;
+using SeatApi.Services.Resilience;
 
 namespace SeatApi.Services;
 
@@ -14,6 +15,7 @@ public class ReservationService : IReservationService
     private readonly IKeyCache _keyCache;
     private readonly ISeatLockManager _seatLockManager;
     private readonly IDbGate _dbGate;
+    private readonly ITransientRetry _transientRetry;
 
     public ReservationService(
         IReservationRepository repo,
@@ -21,7 +23,8 @@ public class ReservationService : IReservationService
         ITakenFilter takenFilter,
         IKeyCache keyCache,
         ISeatLockManager seatLockManager,
-        IDbGate dbGate)
+        IDbGate dbGate,
+        ITransientRetry transientRetry)
     {
         _repo = repo;
         _showCache = showCache;
@@ -29,6 +32,7 @@ public class ReservationService : IReservationService
         _keyCache = keyCache;
         _seatLockManager = seatLockManager;
         _dbGate = dbGate;
+        _transientRetry = transientRetry;
     }
 
     public async Task<ReserveResult> ReserveAsync(
@@ -171,14 +175,16 @@ public class ReservationService : IReservationService
                 new Dictionary<string, object> { ["unavailable"] = unavailableSeatsFromFilter });
         }
 
-        // 6.e. DbGate.WaitAsync. Run the existing DB transaction.
+        // 6.e. DbGate.WaitAsync. Run the existing DB transaction wrapped in transient retry.
         var reservationId = Guid.NewGuid();
-        ReserveResult result;
-        await using (await _dbGate.WaitAsync(ct))
+        ReserveResult result = await _transientRetry.RunAsync(async () =>
         {
-            result = await _repo.ExecuteReservationAsync(
-                reservationId, show, userId, key, requestHash, sortedSeats, ct);
-        }
+            await using (await _dbGate.WaitAsync(ct))
+            {
+                return await _repo.ExecuteReservationAsync(
+                    reservationId, show, userId, key, requestHash, sortedSeats, ct);
+            }
+        }, ct);
 
         // 6.f. Still holding the seat locks:
         switch (result.Outcome)
@@ -222,8 +228,10 @@ public class ReservationService : IReservationService
         CancellationToken ct = default)
     {
         // 7.1. Need the reservation's seats to lock them: first SELECT show_id, seats, user_id FROM reservations WHERE id=@r
-        // (read only; 404 if not found or not the owner, no lock yet)
-        var metadata = await _repo.GetReservationForCancelAsync(reservationId, ct);
+        // (read only; 404 if not found or not the owner, no lock yet) wrapped in transient retry
+        var metadata = await _transientRetry.RunAsync(
+            () => _repo.GetReservationForCancelAsync(reservationId, ct), ct);
+
         if (metadata is null || metadata.UserId != userId)
         {
             return CancelResult.NotFound("Reservation not found");
@@ -231,14 +239,16 @@ public class ReservationService : IReservationService
 
         var sortedSeats = metadata.Seats.OrderBy(s => s, StringComparer.Ordinal).ToList();
 
-        // 7.2. SeatLockManager.AcquireAsync(sorted seats), then DbGate, then the existing cancel transaction, release gate.
+        // 7.2. SeatLockManager.AcquireAsync(sorted seats), then DbGate, then the existing cancel transaction wrapped in retry.
         await using var seatLocks = await _seatLockManager.AcquireAsync(metadata.ShowId, sortedSeats, ct);
 
-        CancelResult result;
-        await using (await _dbGate.WaitAsync(ct))
+        CancelResult result = await _transientRetry.RunAsync(async () =>
         {
-            result = await _repo.CancelReservationAsync(reservationId, userId, ct);
-        }
+            await using (await _dbGate.WaitAsync(ct))
+            {
+                return await _repo.CancelReservationAsync(reservationId, userId, ct);
+            }
+        }, ct);
 
         // 7.3. After COMMIT only: TakenFilter.Evict for the seats THIS cancel actually freed
         // (the ones whose UPDATE matched). Then release the locks.

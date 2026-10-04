@@ -9,4 +9,6 @@ public class DbOptions
     public const string SectionName = "Db";
 
     public int GateSize { get; set; } = 6;
+
+    public int RetryWindowSeconds { get; set; } = 10;
 }
