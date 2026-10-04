@@ -14,3 +14,11 @@ Key behaviours:
 
 > **Database Note:** `db/schema.sql` is mounted to `/docker-entrypoint-initdb.d/` in docker compose and executes automatically only on the first start of a fresh volume.
 
+## Burst Testing
+
+Run the high-concurrency burst stampede test:
+```bash
+python3 burst.py <BASE_URL> [--users 2000] [--hot 5] [--seats 500] [--concurrency 500] [--timeout 60] [--yes]
+```
+*(On Windows: `py burst.py <BASE_URL> ...` or `python burst.py <BASE_URL> ...`)*
+
