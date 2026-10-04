@@ -49,6 +49,28 @@ public class ReservationRepository : IReservationRepository
         return found.ToList();
     }
 
+    public async Task<ReservationMetadata?> GetReservationForCancelAsync(Guid reservationId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenConnectionAsync(ct);
+
+        // Reads reservation metadata to identify seats to lock before cancel
+        var row = await conn.QuerySingleOrDefaultAsync<(Guid ShowId, string[] Seats, string UserId, short Status)>(new CommandDefinition(
+            """
+            SELECT show_id, seats, user_id, status
+            FROM reservations
+            WHERE id = @Id;
+            """,
+            new { Id = reservationId },
+            cancellationToken: ct));
+
+        if (row == default)
+        {
+            return null;
+        }
+
+        return new ReservationMetadata(row.ShowId, row.Seats, row.UserId, row.Status);
+    }
+
     public async Task<ReserveResult> ExecuteReservationAsync(
         Guid reservationId,
         Show show,
@@ -127,24 +149,25 @@ public class ReservationRepository : IReservationRepository
             {
                 await tx.RollbackAsync(ct);
 
-                // Reads requested seats that are already taken for the decline response
-                var unavailableSeats = (await conn.QueryAsync<string>(new CommandDefinition(
+                // Reads taken seats with their current owner user IDs to populate memory filter and response
+                var takenRows = (await conn.QueryAsync<(string SeatLabel, string UserId)>(new CommandDefinition(
                     """
-                    SELECT seat_label
-                    FROM seats
-                    WHERE show_id = @ShowId
-                      AND seat_label = ANY(@Labels::text[])
-                      AND reservation_id IS NOT NULL;
+                    SELECT s.seat_label, r.user_id
+                    FROM seats s
+                    JOIN reservations r ON r.id = s.reservation_id
+                    WHERE s.show_id = @ShowId
+                      AND s.seat_label = ANY(@Labels::text[]);
                     """,
                     new { ShowId = show.Id, Labels = sortedSeats.ToArray() },
                     cancellationToken: ct))).ToList();
 
+                var unavailableSeats = takenRows.Select(r => r.SeatLabel).Distinct(StringComparer.Ordinal).ToList();
                 var extra = new Dictionary<string, object>
                 {
                     ["unavailable"] = unavailableSeats
                 };
 
-                return ReserveResult.Decline(409, "seat-taken", "One or more requested seats are already reserved", extra);
+                return ReserveResult.Decline(409, "seat-taken", "One or more requested seats are already reserved", extra, takenRows);
             }
         }
 
@@ -192,7 +215,7 @@ public class ReservationRepository : IReservationRepository
 
         // f. Commit transaction and return confirmed response
         await tx.CommitAsync(ct);
-        return ReserveResult.Created(response);
+        return ReserveResult.Created(response, responseJson);
     }
 
     public async Task<CancelResult> CancelReservationAsync(
@@ -238,7 +261,7 @@ public class ReservationRepository : IReservationRepository
                     Seats = existing.Seats,
                     AmountPaise = existing.AmountPaise,
                     Status = "cancelled"
-                });
+                }, freedSeats: Array.Empty<string>());
             }
 
             return CancelResult.NotFound("Reservation not found");
@@ -260,6 +283,7 @@ public class ReservationRepository : IReservationRepository
 
         // c. Atomically frees each seat in sorted order if still held by this reservation
         int freedCount = 0;
+        var freedSeats = new List<string>();
         var sortedSeats = seats.OrderBy(s => s, StringComparer.Ordinal).ToList();
         foreach (var seatLabel in sortedSeats)
         {
@@ -271,6 +295,11 @@ public class ReservationRepository : IReservationRepository
                 """,
                 new { ShowId = showId, SeatLabel = seatLabel, ReservationId = reservationId },
                 tx, cancellationToken: ct));
+
+            if (rows > 0)
+            {
+                freedSeats.Add(seatLabel);
+            }
 
             freedCount += rows;
         }
@@ -295,6 +324,6 @@ public class ReservationRepository : IReservationRepository
             Seats = seats,
             AmountPaise = amountPaise,
             Status = "cancelled"
-        });
+        }, freedSeats);
     }
 }

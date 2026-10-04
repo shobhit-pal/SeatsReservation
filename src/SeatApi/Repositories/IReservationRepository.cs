@@ -8,6 +8,8 @@ public interface IReservationRepository
 
     Task<IReadOnlyList<string>> GetExistingSeatLabelsAsync(Guid showId, IReadOnlyList<string> seatLabels, CancellationToken ct = default);
 
+    Task<ReservationMetadata?> GetReservationForCancelAsync(Guid reservationId, CancellationToken ct = default);
+
     Task<ReserveResult> ExecuteReservationAsync(
         Guid reservationId,
         Show show,

@@ -10,6 +10,7 @@ using Npgsql;
 using SeatApi.Models;
 using SeatApi.Repositories;
 using SeatApi.Services;
+using SeatApi.Services.Cache;
 
 // ---------------------------------------------------------------------------
 // 1. Load .env before CreateBuilder so IConfiguration sees the values.
@@ -96,6 +97,21 @@ var dataSource = NpgsqlDataSource.Create(connectionString);
 builder.Services.AddSingleton(dataSource);
 
 // ---------------------------------------------------------------------------
+// 6.4. In-memory layer singletons (ShowCache, TakenFilter, KeyCache, SeatLockManager, DbGate)
+// ---------------------------------------------------------------------------
+builder.Services.AddSingleton<IShowCache, ShowCache>();
+builder.Services.AddSingleton<ITakenFilter, TakenFilter>();
+builder.Services.AddSingleton<IKeyCache, KeyCache>();
+builder.Services.AddSingleton<ISeatLockManager, SeatLockManager>();
+builder.Services.AddSingleton<IDbGate, DbGate>();
+
+// ---------------------------------------------------------------------------
+// 6.45. WarmupService (preloads pool, shows, taken seats, keys)
+// ---------------------------------------------------------------------------
+builder.Services.AddSingleton<WarmupService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<WarmupService>());
+
+// ---------------------------------------------------------------------------
 // 6.5. Show repository and service (Commit D)
 // ---------------------------------------------------------------------------
 builder.Services.AddScoped<IShowRepository, ShowRepository>();
@@ -166,6 +182,10 @@ app.UseAuthorization();
 
 // Liveness probe — no DB dependency (design.md §4.6)
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+
+// Readiness probe — checks warm-up completion
+app.MapGet("/health/ready", (WarmupService warmup) =>
+    warmup.IsWarm ? Results.Ok(new { status = "ready" }) : Results.StatusCode(503));
 
 // Controllers will be mapped in later commits (auth, shows, reservations)
 app.MapControllers();
