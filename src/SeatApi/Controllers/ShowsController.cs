@@ -35,6 +35,26 @@ public class ShowsController : ControllerBase
         return StatusCode(201, result.Value);
     }
 
+    [HttpGet("{id}")]
+    [Authorize(Policy = "AnyUser")]
+    public async Task<IActionResult> GetShow(
+        [FromRoute] string id,
+        [FromQuery] string? summary,
+        CancellationToken ct)
+    {
+        var result = await _showService.GetShowStateAsync(id, summary, ct);
+
+        if (!result.IsSuccess)
+        {
+            if (result.ErrorCode == "show-not-found")
+                return NotFound(ApiError.Response("show-not-found", result.ErrorMessage!));
+
+            return BadRequest(ApiError.Validation(result.ErrorMessage!));
+        }
+
+        return Ok(result.Value);
+    }
+
     [HttpPost("{id}/reserve")]
     [Authorize(Policy = "AnyUser")]
     public async Task<IActionResult> Reserve(

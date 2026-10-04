@@ -86,8 +86,27 @@ public class ShowService : IShowService
             PerUserLimit = show.PerUserLimit,
             TotalSeats   = show.TotalSeats,
             Seats        = req.Seats
-                .Select(s => new SeatStatusResponse { Seat = s, Status = "available" })
+                .Select(s => new SeatStatusResponse { Seat = s, Status = SeatStatus.Available })
                 .ToList()
         });
+    }
+
+    public async Task<ServiceResult<ShowStateResponse>> GetShowStateAsync(
+        string idRaw, string? summaryRaw, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(idRaw) || !Guid.TryParse(idRaw, out var showId))
+        {
+            return ServiceResult<ShowStateResponse>.Fail("show-not-found", "Show not found");
+        }
+
+        bool summaryOnly = string.Equals(summaryRaw, "true", StringComparison.Ordinal);
+
+        var state = await _repo.GetShowStateAsync(showId, summaryOnly, ct);
+        if (state is null)
+        {
+            return ServiceResult<ShowStateResponse>.Fail("show-not-found", "Show not found");
+        }
+
+        return ServiceResult<ShowStateResponse>.Ok(state);
     }
 }
