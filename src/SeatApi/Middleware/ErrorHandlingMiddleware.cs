@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using SeatApi.Services.Metrics;
 using SeatApi.Services.Resilience;
 
 namespace SeatApi.Middleware;
@@ -9,16 +10,18 @@ public class ErrorHandlingMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ILogger<ErrorHandlingMiddleware> _logger;
+    private readonly IAppMetrics _metrics;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
     };
 
-    public ErrorHandlingMiddleware(RequestDelegate next, ILogger<ErrorHandlingMiddleware> logger)
+    public ErrorHandlingMiddleware(RequestDelegate next, ILogger<ErrorHandlingMiddleware> logger, IAppMetrics metrics)
     {
         _next = next;
         _logger = logger;
+        _metrics = metrics;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -68,6 +71,8 @@ public class ErrorHandlingMiddleware
 
     private async Task HandleExceptionAsync(HttpContext context, Exception exception, string correlationId)
     {
+        _metrics.RecordUnhandledException();
+
         if (context.Response.HasStarted)
         {
             _logger.LogWarning("Response has already started, unable to write error response for {CorrelationId}", correlationId);

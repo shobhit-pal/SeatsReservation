@@ -261,7 +261,7 @@ public class ReservationRepository : IReservationRepository
                     Seats = existing.Seats,
                     AmountPaise = existing.AmountPaise,
                     Status = "cancelled"
-                }, freedSeats: Array.Empty<string>());
+                }, freedSeats: Array.Empty<string>(), isEffective: false);
             }
 
             return CancelResult.NotFound("Reservation not found");

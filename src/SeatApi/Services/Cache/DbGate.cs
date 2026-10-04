@@ -1,22 +1,33 @@
 using Microsoft.Extensions.Options;
 using SeatApi.Models;
+using SeatApi.Services.Metrics;
 
 namespace SeatApi.Services.Cache;
 
 public class DbGate : IDbGate
 {
     private readonly SemaphoreSlim _semaphore;
+    private readonly IAppMetrics _metrics;
 
-    public DbGate(IOptions<DbOptions> options)
+    public DbGate(IOptions<DbOptions> options, IAppMetrics metrics)
     {
         var gateSize = options.Value.GateSize;
         _semaphore = new SemaphoreSlim(gateSize, gateSize);
+        _metrics = metrics;
     }
 
     public async Task<IAsyncDisposable> WaitAsync(CancellationToken ct = default)
     {
-        await _semaphore.WaitAsync(ct);
-        return new GateReleaser(_semaphore);
+        _metrics.IncrementDbGateWaiting();
+        try
+        {
+            await _semaphore.WaitAsync(ct);
+            return new GateReleaser(_semaphore);
+        }
+        finally
+        {
+            _metrics.DecrementDbGateWaiting();
+        }
     }
 
     private sealed class GateReleaser : IAsyncDisposable

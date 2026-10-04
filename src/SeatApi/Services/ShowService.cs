@@ -1,6 +1,7 @@
 using SeatApi.Models;
 using SeatApi.Repositories;
 using SeatApi.Services.Cache;
+using SeatApi.Services.Metrics;
 
 namespace SeatApi.Services;
 
@@ -8,11 +9,13 @@ public class ShowService : IShowService
 {
     private readonly IShowRepository _repo;
     private readonly IShowCache _showCache;
+    private readonly IAppMetrics _metrics;
 
-    public ShowService(IShowRepository repo, IShowCache showCache)
+    public ShowService(IShowRepository repo, IShowCache showCache, IAppMetrics metrics)
     {
         _repo = repo;
         _showCache = showCache;
+        _metrics = metrics;
     }
 
     public async Task<ServiceResult<ShowResponse>> CreateShowAsync(
@@ -72,6 +75,7 @@ public class ShowService : IShowService
 
         await _repo.CreateAsync(show, req.Seats, ct);
         _showCache.Set(show, req.Seats);
+        _metrics.SetSeatsAvailable(show.Id, show.TotalSeats);
 
         // Map to response — all seats start as available
         return ServiceResult<ShowResponse>.Ok(new ShowResponse

@@ -13,7 +13,9 @@ using SeatApi.Models;
 using SeatApi.Repositories;
 using SeatApi.Services;
 using SeatApi.Services.Cache;
+using SeatApi.Services.Metrics;
 using SeatApi.Services.Resilience;
+using Prometheus;
 
 // ---------------------------------------------------------------------------
 // 1. Load .env before CreateBuilder so IConfiguration sees the values.
@@ -103,10 +105,12 @@ var dataSource = NpgsqlDataSource.Create(connectionString);
 builder.Services.AddSingleton(dataSource);
 
 // ---------------------------------------------------------------------------
-// 6.3. Resilience services (Retry, Observers)
+// 6.3. Resilience services (Retry, Observers) & Metrics
 // ---------------------------------------------------------------------------
-builder.Services.AddSingleton<IDbRetryObserver, NoOpDbRetryObserver>();
+builder.Services.AddSingleton<IAppMetrics, AppMetrics>();
+builder.Services.AddSingleton<IDbRetryObserver, PrometheusDbRetryObserver>();
 builder.Services.AddSingleton<ITransientRetry, TransientRetry>();
+builder.Services.AddHostedService<SeatsAvailableSyncService>();
 
 // ---------------------------------------------------------------------------
 // 6.4. In-memory layer singletons (ShowCache, TakenFilter, KeyCache, SeatLockManager, DbGate)
@@ -191,8 +195,13 @@ app.Logger.LogInformation(
 
 app.UseMiddleware<ErrorHandlingMiddleware>();
 
+app.UseHttpMetrics();
+
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Metrics endpoint — no auth, plain Prometheus text
+app.MapMetrics();
 
 // Liveness probe — no DB dependency (design.md §4.6)
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));

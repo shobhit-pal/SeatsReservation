@@ -16,9 +16,13 @@ public class CancelResult
     public ReservationResponse? Response { get; private init; }
     public string? ErrorMessage { get; private init; }
     public IReadOnlyList<string>? FreedSeats { get; private init; }
+    public bool IsEffective { get; private init; }
 
-    public static CancelResult Cancelled(ReservationResponse response, IReadOnlyList<string>? freedSeats = null) =>
-        new() { Outcome = OutcomeType.Cancelled, Response = response, FreedSeats = freedSeats };
+    public static CancelResult Cancelled(
+        ReservationResponse response,
+        IReadOnlyList<string>? freedSeats = null,
+        bool isEffective = true) =>
+        new() { Outcome = OutcomeType.Cancelled, Response = response, FreedSeats = freedSeats, IsEffective = isEffective };
 
     public static CancelResult NotFound(string message = "Reservation not found") =>
         new() { Outcome = OutcomeType.NotFound, ErrorMessage = message };

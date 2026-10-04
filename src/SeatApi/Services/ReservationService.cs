@@ -3,6 +3,7 @@ using System.Text;
 using SeatApi.Models;
 using SeatApi.Repositories;
 using SeatApi.Services.Cache;
+using SeatApi.Services.Metrics;
 using SeatApi.Services.Resilience;
 
 namespace SeatApi.Services;
@@ -16,6 +17,7 @@ public class ReservationService : IReservationService
     private readonly ISeatLockManager _seatLockManager;
     private readonly IDbGate _dbGate;
     private readonly ITransientRetry _transientRetry;
+    private readonly IAppMetrics _metrics;
 
     public ReservationService(
         IReservationRepository repo,
@@ -24,7 +26,8 @@ public class ReservationService : IReservationService
         IKeyCache keyCache,
         ISeatLockManager seatLockManager,
         IDbGate dbGate,
-        ITransientRetry transientRetry)
+        ITransientRetry transientRetry,
+        IAppMetrics metrics)
     {
         _repo = repo;
         _showCache = showCache;
@@ -33,6 +36,7 @@ public class ReservationService : IReservationService
         _seatLockManager = seatLockManager;
         _dbGate = dbGate;
         _transientRetry = transientRetry;
+        _metrics = metrics;
     }
 
     public async Task<ReserveResult> ReserveAsync(
@@ -86,6 +90,7 @@ public class ReservationService : IReservationService
         // then blank labels and duplicates, then the seat existence check against cached seat set.
         if (request.Seats.Count > show.PerUserLimit)
         {
+            _metrics.RecordDeclinedReservation("per-user-limit");
             return ReserveResult.Decline(409, "per-user-limit", "Active seat limit exceeded for this show");
         }
 
@@ -131,9 +136,11 @@ public class ReservationService : IReservationService
         {
             if (cachedKey.RequestHash == requestHash)
             {
+                _metrics.RecordDeclinedReservation("idempotent-replay");
                 return ReserveResult.Replay(cachedKey.ResponseJson);
             }
 
+            _metrics.RecordDeclinedReservation("idempotency-key-reuse");
             return ReserveResult.Decline(409, "idempotency-key-reuse", "This key was already used with different parameters");
         }
 
@@ -146,6 +153,8 @@ public class ReservationService : IReservationService
 
         if (unavailableSeatsFromFilter.Count > 0)
         {
+            _metrics.RecordTakenFilterHit();
+            _metrics.RecordDeclinedReservation("seat-taken");
             return ReserveResult.Decline(409, "seat-taken", "One or more requested seats are already reserved",
                 new Dictionary<string, object> { ["unavailable"] = unavailableSeatsFromFilter });
         }
@@ -158,9 +167,11 @@ public class ReservationService : IReservationService
         {
             if (cachedKey.RequestHash == requestHash)
             {
+                _metrics.RecordDeclinedReservation("idempotent-replay");
                 return ReserveResult.Replay(cachedKey.ResponseJson);
             }
 
+            _metrics.RecordDeclinedReservation("idempotency-key-reuse");
             return ReserveResult.Decline(409, "idempotency-key-reuse", "This key was already used with different parameters");
         }
 
@@ -171,6 +182,8 @@ public class ReservationService : IReservationService
 
         if (unavailableSeatsFromFilter.Count > 0)
         {
+            _metrics.RecordTakenFilterHit();
+            _metrics.RecordDeclinedReservation("seat-taken");
             return ReserveResult.Decline(409, "seat-taken", "One or more requested seats are already reserved",
                 new Dictionary<string, object> { ["unavailable"] = unavailableSeatsFromFilter });
         }
@@ -198,6 +211,7 @@ public class ReservationService : IReservationService
                 {
                     _keyCache.Set(userId, key, requestHash, result.StoredJson);
                 }
+                _metrics.RecordConfirmedReservation(show.Id, sortedSeats.Count);
                 break;
 
             case ReserveResult.OutcomeType.Replay:
@@ -205,6 +219,7 @@ public class ReservationService : IReservationService
                 {
                     _keyCache.Set(userId, key, requestHash, result.StoredJson);
                 }
+                _metrics.RecordDeclinedReservation("idempotent-replay");
                 break;
 
             case ReserveResult.OutcomeType.Decline:
@@ -214,6 +229,10 @@ public class ReservationService : IReservationService
                     {
                         _takenFilter.MarkTaken(show.Id, seatLabel, ownerUserId);
                     }
+                }
+                if (result.ErrorCode is "seat-taken" or "per-user-limit" or "idempotency-key-reuse")
+                {
+                    _metrics.RecordDeclinedReservation(result.ErrorCode);
                 }
                 break;
         }
@@ -253,11 +272,19 @@ public class ReservationService : IReservationService
         // 7.3. After COMMIT only: TakenFilter.Evict for the seats THIS cancel actually freed
         // (the ones whose UPDATE matched). Then release the locks.
         // If the cancel was a no-op (already cancelled), evict nothing.
-        if (result.Outcome == CancelResult.OutcomeType.Cancelled && result.FreedSeats is { Count: > 0 })
+        if (result.Outcome == CancelResult.OutcomeType.Cancelled)
         {
-            foreach (var seat in result.FreedSeats)
+            if (result.FreedSeats is { Count: > 0 })
             {
-                _takenFilter.Evict(metadata.ShowId, seat);
+                foreach (var seat in result.FreedSeats)
+                {
+                    _takenFilter.Evict(metadata.ShowId, seat);
+                }
+            }
+
+            if (result.IsEffective)
+            {
+                _metrics.RecordCancelledReservation(metadata.ShowId, result.FreedSeats?.Count ?? 0);
             }
         }
 

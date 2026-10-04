@@ -8,6 +8,8 @@ using Npgsql;
 using SeatApi.Models;
 using SeatApi.Services.Cache;
 
+using SeatApi.Services.Metrics;
+
 namespace SeatApi.Services;
 
 public class WarmupService : IHostedService
@@ -16,6 +18,7 @@ public class WarmupService : IHostedService
     private readonly IShowCache _showCache;
     private readonly ITakenFilter _takenFilter;
     private readonly IKeyCache _keyCache;
+    private readonly IAppMetrics _metrics;
     private readonly ILogger<WarmupService> _logger;
     private readonly string _connectionString;
 
@@ -26,6 +29,7 @@ public class WarmupService : IHostedService
         IShowCache showCache,
         ITakenFilter takenFilter,
         IKeyCache keyCache,
+        IAppMetrics metrics,
         ILogger<WarmupService> logger,
         Microsoft.Extensions.Configuration.IConfiguration config)
     {
@@ -33,6 +37,7 @@ public class WarmupService : IHostedService
         _showCache = showCache;
         _takenFilter = takenFilter;
         _keyCache = keyCache;
+        _metrics = metrics;
         _logger = logger;
         _connectionString = config["ConnectionStrings:Default"] ?? string.Empty;
     }
@@ -116,6 +121,19 @@ public class WarmupService : IHostedService
                 .GroupBy(r => r.ShowId)
                 .ToDictionary(g => g.Key, g => g.Select(x => x.SeatLabel).ToList());
 
+            // Preloads available seat counts for cached shows to initialize seats_available gauge
+            var availableCounts = await mainConn.QueryAsync<(Guid ShowId, long AvailableCount)>(new CommandDefinition(
+                """
+                SELECT show_id, count(*) FILTER (WHERE reservation_id IS NULL) AS available_count
+                FROM seats
+                WHERE show_id = ANY(@ShowIds::uuid[])
+                GROUP BY show_id;
+                """,
+                new { ShowIds = showIds },
+                cancellationToken: cancellationToken));
+
+            var countsDict = availableCounts.ToDictionary(x => x.ShowId, x => (int)x.AvailableCount);
+
             foreach (var show in shows)
             {
                 if (seatsByShow.TryGetValue(show.Id, out var labels))
@@ -126,6 +144,8 @@ public class WarmupService : IHostedService
                 {
                     _showCache.Set(show, Array.Empty<string>());
                 }
+
+                _metrics.SetSeatsAvailable(show.Id, countsDict.TryGetValue(show.Id, out var count) ? count : 0);
             }
         }
 
