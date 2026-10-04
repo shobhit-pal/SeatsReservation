@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
+using SeatApi.Repositories;
 using SeatApi.Services;
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,10 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 builder.Services
     .AddControllers()
     .AddJsonOptions(o =>
-        o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower)
+    {
+        o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
+        o.JsonSerializerOptions.NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.Strict;
+    })
     .ConfigureApiBehaviorOptions(options =>
     {
         options.InvalidModelStateResponseFactory = context =>
@@ -77,7 +81,13 @@ var dataSource = NpgsqlDataSource.Create(connectionString);
 builder.Services.AddSingleton(dataSource);
 
 // ---------------------------------------------------------------------------
-// 6.5. Auth setup
+// 6.5. Show repository and service (Commit D)
+// ---------------------------------------------------------------------------
+builder.Services.AddScoped<IShowRepository, ShowRepository>();
+builder.Services.AddScoped<IShowService, ShowService>();
+
+// ---------------------------------------------------------------------------
+// 6.6. Auth setup
 // ---------------------------------------------------------------------------
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 
