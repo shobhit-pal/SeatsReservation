@@ -13,7 +13,7 @@ using SeatApi.Services;
 // 1. Load .env before CreateBuilder so IConfiguration sees the values.
 //    DotNetEnv traverses parent dirs, enabling `dotnet run` from any cwd.
 // ---------------------------------------------------------------------------
-DotNetEnv.Env.TraversePath().Load();
+DotNetEnv.Env.NoClobber().TraversePath().Load();
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -136,3 +136,4 @@ app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapControllers();
 
 app.Run();
+

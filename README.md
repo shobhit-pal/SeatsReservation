@@ -11,3 +11,6 @@ Key behaviours:
 - **No 5xx under a ~20k request burst** — 4xx for every business decline, 503 only after the DB retry window is exhausted.
 - **JWT-based identity** — `user_id` comes from the token only; body fields are ignored.
 - **CP over AP** — refuses to confirm if the DB is unreachable rather than risk a double-sell.
+
+> **Database Note:** `db/schema.sql` is mounted to `/docker-entrypoint-initdb.d/` in docker compose and executes automatically only on the first start of a fresh volume.
+
