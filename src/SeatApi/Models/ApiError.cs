@@ -2,15 +2,30 @@ namespace SeatApi.Models;
 
 public static class ApiError
 {
+    public static object Response(string error, string message, IReadOnlyDictionary<string, object>? extra = null)
+    {
+        if (extra is null || extra.Count == 0)
+        {
+            return new { error, message };
+        }
+
+        var dict = new Dictionary<string, object>(extra, StringComparer.Ordinal)
+        {
+            ["error"] = error,
+            ["message"] = message
+        };
+        return dict;
+    }
+
     public static object Validation(string message) =>
-        new { error = "validation", message };
+        Response("validation", message);
 
     public static object NotFound(string message) =>
-        new { error = "not-found", message };
+        Response("not-found", message);
 
     public static object Unauthorized() =>
-        new { error = "unauthorized", message = "Missing or invalid token" };
+        Response("unauthorized", "Missing or invalid token");
 
     public static object Forbidden() =>
-        new { error = "forbidden", message = "Insufficient permissions" };
+        Response("forbidden", "Insufficient permissions");
 }

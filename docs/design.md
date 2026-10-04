@@ -24,7 +24,7 @@ Goal: never double-sell a seat, never exceed the per-user limit, never double-bo
 | Multi-seat request | **All-or-nothing**: one transaction, any failure rolls everything back. Document why not best-effort: simpler, no partial states, easier to keep correct under concurrency. |
 | `per_user_limit` | Stored per show, default 4, allowed 1 to 10. Counts active (non-cancelled) seats across all of that user's requests for that show. |
 | Max seats per request | Equal to the show's `per_user_limit`. `len(seats) > per_user_limit` gives 409 per-user-limit with no DB call. |
-| Abuse guard | More than 50 entries in `seats` gives 400. |
+| Abuse guard | Oversized payloads are bounded by Kestrel's 4 MB limit (413). (Create show retains 50,000 max seats guard). |
 | Cancel model | Explicit `POST /reservations/{id}/cancel`, owner only. Admin has no cancel power. No TTL holds. |
 | `held` status | Not used. API reports `held: 0` so the invariant keeps its shape. |
 | Declines | Never stored. Recomputed on each request, so a seat freed by cancel can be won later. |
@@ -135,16 +135,21 @@ Checked in this order:
 | Case | Status | error |
 |---|---|---|
 | No or bad token | 401 | unauthorized |
-| Show not found | 404 | show-not-found |
+| Show not found (or non-UUID) | 404 | show-not-found |
 | Key missing, empty, over 128 chars, or header/body mismatch | 400 | validation |
-| `seats` empty, duplicates, blank labels, or over 50 entries | 400 | validation |
-| Seat not in this show | 404 | seat-not-found (`unknown: [...]`) |
-| `len(seats) > per_user_limit` | 409 | per-user-limit |
+| `seats` null or empty | 400 | validation |
+| `len(seats) > per_user_limit` (O(1) count check before scans/DB) | 409 | per-user-limit |
+| Blank labels in `seats` | 400 | validation |
+| Duplicate labels in `seats` | 400 | validation |
+| Seat not in this show (queried against DB with at most `per_user_limit` entries) | 404 | seat-not-found (`unknown: [...]`) |
 | Same key, same body | 201 | stored original (idempotent-replay) |
 | Same key, different body | 409 | idempotency-key-reuse |
 | Active seats + requested > limit | 409 | per-user-limit |
 | Any seat taken | 409 | seat-taken (`unavailable: [...]`) |
 | DB unreachable after the retry window | 503 | unavailable (+ `Retry-After`) |
+
+> **Validation Ordering & Side Effect:** Cheap count checks run before any string scanning or database calls. Consequently, subsequent validation steps (blank/duplicate checks) and the DB seat-existence query only ever process at most `per_user_limit` entries.  
+> **Side effect:** A request with duplicate seats whose total count exceeds `per_user_limit` will return `409 per-user-limit` instead of `400 validation` because the count check runs first.
 
 Per-user-limit wins over seat-taken when both apply (quota is checked first). Document it.
 

@@ -102,6 +102,12 @@ builder.Services.AddScoped<IShowRepository, ShowRepository>();
 builder.Services.AddScoped<IShowService, ShowService>();
 
 // ---------------------------------------------------------------------------
+// 6.51. Reservation repository and service
+// ---------------------------------------------------------------------------
+builder.Services.AddScoped<IReservationRepository, ReservationRepository>();
+builder.Services.AddScoped<IReservationService, ReservationService>();
+
+// ---------------------------------------------------------------------------
 // 6.6. Auth setup
 // ---------------------------------------------------------------------------
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();

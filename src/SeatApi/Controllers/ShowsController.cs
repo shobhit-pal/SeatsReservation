@@ -7,14 +7,19 @@ namespace SeatApi.Controllers;
 
 [ApiController]
 [Route("shows")]
-[Authorize(Policy = "AdminOnly")]
 public class ShowsController : ControllerBase
 {
     private readonly IShowService _showService;
+    private readonly IReservationService _reservationService;
 
-    public ShowsController(IShowService showService) => _showService = showService;
+    public ShowsController(IShowService showService, IReservationService reservationService)
+    {
+        _showService = showService;
+        _reservationService = reservationService;
+    }
 
     [HttpPost]
+    [Authorize(Policy = "AdminOnly")]
     public async Task<IActionResult> CreateShow([FromBody] CreateShowRequest? request,
                                                 CancellationToken ct)
     {
@@ -28,5 +33,34 @@ public class ShowsController : ControllerBase
             return BadRequest(ApiError.Validation(result.ErrorMessage!));
 
         return StatusCode(201, result.Value);
+    }
+
+    [HttpPost("{id}/reserve")]
+    [Authorize(Policy = "AnyUser")]
+    public async Task<IActionResult> Reserve(
+        [FromRoute] string id,
+        [FromBody] ReserveRequest? request,
+        [FromHeader(Name = "Idempotency-Key")] string? headerIdempotencyKey,
+        CancellationToken ct)
+    {
+        var currentUser = new CurrentUser(HttpContext);
+        var result = await _reservationService.ReserveAsync(
+            id, request, headerIdempotencyKey, currentUser.UserId, ct);
+
+        return result.Outcome switch
+        {
+            ReserveResult.OutcomeType.Created =>
+                StatusCode(201, result.Response),
+
+            ReserveResult.OutcomeType.Replay =>
+                StatusCode(201, System.Text.Json.JsonSerializer.Deserialize<ReservationResponse>(
+                    result.StoredJson!,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower })),
+
+            ReserveResult.OutcomeType.Decline =>
+                StatusCode(result.StatusCode, ApiError.Response(result.ErrorCode!, result.ErrorMessage!, result.Extra)),
+
+            _ => StatusCode(500)
+        };
     }
 }
