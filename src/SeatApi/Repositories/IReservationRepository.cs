@@ -16,4 +16,9 @@ public interface IReservationRepository
         string requestHash,
         IReadOnlyList<string> sortedSeats,
         CancellationToken ct = default);
+
+    Task<CancelResult> CancelReservationAsync(
+        Guid reservationId,
+        string userId,
+        CancellationToken ct = default);
 }

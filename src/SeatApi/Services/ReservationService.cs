@@ -104,4 +104,12 @@ public class ReservationService : IReservationService
         return await _repo.ExecuteReservationAsync(
             reservationId, show, userId, key, requestHash, sortedSeats, ct);
     }
+
+    public Task<CancelResult> CancelAsync(
+        Guid reservationId,
+        string userId,
+        CancellationToken ct = default)
+    {
+        return _repo.CancelReservationAsync(reservationId, userId, ct);
+    }
 }

@@ -194,4 +194,107 @@ public class ReservationRepository : IReservationRepository
         await tx.CommitAsync(ct);
         return ReserveResult.Created(response);
     }
+
+    public async Task<CancelResult> CancelReservationAsync(
+        Guid reservationId,
+        string userId,
+        CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
+
+        // a. Flips confirmed reservation to cancelled once for the authenticated owner
+        var confirmedReservation = await conn.QuerySingleOrDefaultAsync<(Guid ShowId, string[] Seats, long AmountPaise)>(new CommandDefinition(
+            """
+            UPDATE reservations
+            SET status = 2, cancelled_at = now()
+            WHERE id = @Id AND user_id = @UserId AND status = 1
+            RETURNING show_id, seats, amount_paise;
+            """,
+            new { Id = reservationId, UserId = userId },
+            tx, cancellationToken: ct));
+
+        if (confirmedReservation == default)
+        {
+            // Checks if reservation was already cancelled by owner or does not belong to user
+            var existing = await conn.QuerySingleOrDefaultAsync<(Guid ShowId, string[] Seats, long AmountPaise, short Status)>(new CommandDefinition(
+                """
+                SELECT show_id, seats, amount_paise, status
+                FROM reservations
+                WHERE id = @Id AND user_id = @UserId;
+                """,
+                new { Id = reservationId, UserId = userId },
+                tx, cancellationToken: ct));
+
+            await tx.RollbackAsync(ct);
+
+            if (existing != default && existing.Status == (short)ReservationStatus.Cancelled)
+            {
+                return CancelResult.Cancelled(new ReservationResponse
+                {
+                    ReservationId = reservationId,
+                    ShowId = existing.ShowId,
+                    UserId = userId,
+                    Seats = existing.Seats,
+                    AmountPaise = existing.AmountPaise,
+                    Status = "cancelled"
+                });
+            }
+
+            return CancelResult.NotFound("Reservation not found");
+        }
+
+        var showId = confirmedReservation.ShowId;
+        var seats = confirmedReservation.Seats;
+        var amountPaise = confirmedReservation.AmountPaise;
+
+        // b. Locks quota row before seats to maintain consistent lock order and avoid deadlocks
+        await conn.ExecuteAsync(new CommandDefinition(
+            """
+            SELECT 1 FROM user_show_quota
+            WHERE show_id = @ShowId AND user_id = @UserId
+            FOR UPDATE;
+            """,
+            new { ShowId = showId, UserId = userId },
+            tx, cancellationToken: ct));
+
+        // c. Atomically frees each seat in sorted order if still held by this reservation
+        int freedCount = 0;
+        var sortedSeats = seats.OrderBy(s => s, StringComparer.Ordinal).ToList();
+        foreach (var seatLabel in sortedSeats)
+        {
+            var rows = await conn.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE seats
+                SET reservation_id = NULL
+                WHERE show_id = @ShowId AND seat_label = @SeatLabel AND reservation_id = @ReservationId;
+                """,
+                new { ShowId = showId, SeatLabel = seatLabel, ReservationId = reservationId },
+                tx, cancellationToken: ct));
+
+            freedCount += rows;
+        }
+
+        // d. Decrements active seats quota by the number of seats actually freed
+        await conn.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE user_show_quota
+            SET active_seats = active_seats - @FreedCount
+            WHERE show_id = @ShowId AND user_id = @UserId;
+            """,
+            new { ShowId = showId, UserId = userId, FreedCount = freedCount },
+            tx, cancellationToken: ct));
+
+        await tx.CommitAsync(ct);
+
+        return CancelResult.Cancelled(new ReservationResponse
+        {
+            ReservationId = reservationId,
+            ShowId = showId,
+            UserId = userId,
+            Seats = seats,
+            AmountPaise = amountPaise,
+            Status = "cancelled"
+        });
+    }
 }

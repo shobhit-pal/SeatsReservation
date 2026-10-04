@@ -10,4 +10,9 @@ public interface IReservationService
         string? headerIdempotencyKey,
         string userId,
         CancellationToken ct = default);
+
+    Task<CancelResult> CancelAsync(
+        Guid reservationId,
+        string userId,
+        CancellationToken ct = default);
 }
