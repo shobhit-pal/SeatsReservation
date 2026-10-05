@@ -166,9 +166,19 @@ Request ──▶ ShowCache (in-memory metadata)
 
 ---
 
-## 7. AI Usage
+## 7. AI Usage (Directed vs. Decided)
 
-TODO(owner): write this honestly in your own words
+### Directed (What AI Assisted With)
+- **Boilerplate & Scaffolding:** Accelerated repetitive code construction including Dapper repository method stubs, controller HTTP routing, and API error model envelopes.
+- **Client Test Harness:** Rapid prototyping of the single-file `burst.py` script, leveraging Python's `concurrent.futures.ThreadPoolExecutor` and `http.client` for persistent connections.
+- **Observability Configuration:** Streamlined Prometheus metrics formatting in `AppMetrics.cs` and Docker Compose multi-stage build definitions.
+
+### Decided (Engineering Decisions Owned by Human Architecture)
+- **The Core Atomic Decision:** Chose a single conditional SQL statement (`UPDATE seats ... WHERE reservation_id IS NULL`) in PostgreSQL over distributed locks or Redis read-then-write patterns, eliminating race conditions directly at the storage engine level.
+- **Deadlock Avoidance Hierarchy:** Mandated deterministic alphabetical seat sorting (`seats.OrderBy(s => s)`) prior to row updates to ensure strict lock acquisition order during concurrent multi-seat bookings.
+- **All-or-Nothing Semantics:** Enforced that any unavailable seat in a multi-seat reservation triggers a complete database rollback, rejecting partial holds.
+- **Connection Gate Protection:** Sized `Db__GateSize` strictly below PostgreSQL's `Maximum Pool Size` via in-memory semaphore, preventing database connection starvation under stampedes.
+- **Error Classification:** Mapped business declines to 409 status codes and tuned Kestrel timeout limits to guarantee zero 500 errors during burst traffic.
 
 ---
 
