@@ -5,9 +5,10 @@ Guarantees exactly-one booking per seat under concurrent load with atomic SQL up
 All reservation decisions execute in a single conditional SQL transaction—no read-then-write race conditions.
 
 ## Live Service
-- API: LIVE_URL
-- Metrics: METRICS_URL
-- Logs: LOGS_ACCESS
+- **Base URL:** `https://seatsreservation-production.up.railway.app`
+- **Liveness Probe:** `https://seatsreservation-production.up.railway.app/health/live`
+- **Readiness Probe:** `https://seatsreservation-production.up.railway.app/health/ready`
+- **Prometheus Metrics:** `https://seatsreservation-production.up.railway.app/metrics`
 
 ## Quick Start (Docker)
 ```bash
@@ -97,16 +98,22 @@ Error envelope: `{"error":"<code-or-status>","message":"<desc>","details":{...}}
 - **Replay returns original response:** Exact same key + same body returns the stored 201 response.
 
 ## Burst Testing
-Run the single-file burst stampede script:
+Run the single-file burst stampede script against local or live deployment:
+
+**Live deployment burst (standard):**
 ```bash
-python3 burst.py <BASE_URL> --users 20000 --hot 10 --seats 2000 --concurrency 2000 --yes
+python3 burst.py https://seatsreservation-production.up.railway.app --users 2000 --hot 5 --seats 500 --concurrency 100 --yes
 ```
-*(On Windows: `py burst.py <BASE_URL> ...`)*
+
+**Full scale burst (20,000 users):**
+```bash
+python3 burst.py https://seatsreservation-production.up.railway.app --users 20000 --hot 2 --seats 500 --concurrency 100 --yes
+```
+*(On Windows: `python burst.py ...`)*
 
 - **Scenarios checked:** S1 Hot-seat storm, S2 On-sale mix, S3 Retry storm, S4 Key reuse, S5 Per-user limit, S6 Identity, S7 Cancel and rebook.
 - **Interpreting output:** Displays per-scenario latency percentiles (p50/p95/p99/max), rps, and outcome distributions.
-- **Exit code:** Returns `0` only if all 7 reconciliation checks and periodic background invariant samples pass; otherwise `1`.
-- **Warning:** High-concurrency load test. *Only run against servers you own.*
+- **Exit code:** Returns `0` only if all reconciliation checks and periodic background invariant samples pass; otherwise `1`.
 
 ## Metrics Reconciliation
 Scraped at `GET /metrics`:
