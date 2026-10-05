@@ -9,6 +9,7 @@ All reservation decisions execute in a single conditional SQL transaction—no r
 - **Liveness Probe:** `https://seatsreservation-production.up.railway.app/health/live`
 - **Readiness Probe:** `https://seatsreservation-production.up.railway.app/health/ready`
 - **Prometheus Metrics:** `https://seatsreservation-production.up.railway.app/metrics`
+- **Logs Access:** Structured JSON logs with correlation IDs (`X-Request-Id`) streamed in Railway dashboard and stdout.
 
 ## Quick Start (Docker)
 ```bash
@@ -24,6 +25,7 @@ cp .env.example .env
 psql -h localhost -U app -d seats -f db/schema.sql
 dotnet run --project src/SeatApi
 ```
+Both Docker and `dotnet run` listen on `http://localhost:8080` by default.
 
 ## Environment Variables
 | Variable | Description | Default |
@@ -38,41 +40,59 @@ dotnet run --project src/SeatApi
 *Rule:* `Db__GateSize` must stay below `Maximum Pool Size`. Across all servers, `(instances * max_pool_size)` must stay below PostgreSQL `max_connections`.
 
 ## Demo Authentication
-Mint tokens via `POST /auth/token`:
-```bash
-curl -X POST http://localhost:8080/auth/token -H "Content-Type: application/json" \
-  -d '{"user_id":"alice","role":"user"}'
-```
-Demo tokens:
-- Admin: `DEMO_ADMIN_TOKEN`
-- Alice: `DEMO_ALICE_TOKEN`
-- Bob: `DEMO_BOB_TOKEN`
+Mint signed JWT tokens for any identity via `POST /auth/token` (roles: `admin`, `user`):
 
-*Note on demo auth:* Anyone can mint any identity. Production would use real login/IdP; identity in requests comes only from the signed token, never the body.
+```bash
+# Target: Live deployment or local (http://localhost:8080)
+export API_URL="https://seatsreservation-production.up.railway.app"
+
+# Mint an Admin Token
+export ADMIN_TOKEN=$(curl -s -X POST "$API_URL/auth/token" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"admin","role":"admin"}' | grep -o '"token":"[^"]*' | cut -d'"' -f4)
+
+# Mint a User Token (Alice)
+export ALICE_TOKEN=$(curl -s -X POST "$API_URL/auth/token" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"alice","role":"user"}' | grep -o '"token":"[^"]*' | cut -d'"' -f4)
+```
+
+Pre-minted live demo tokens (valid for 24h, or mint fresh ones anytime via the commands above):
+- **Admin:** `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJhZG1pbiIsImV4cCI6MTc5MTI5OTY5NH0.qMEOMdJcfgQA6xcljg11RveL-d8g2XkqXBBKWFmzEBM`
+- **Alice:** `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZSIsInJvbGUiOiJ1c2VyIiwiZXhwIjoxNzkxMjk5Njk1fQ.AoEm6dcW41IsggS7F3bJCrRpadR_L2G9MvXn6s6HtNo`
+- **Bob:** `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJib2IiLCJyb2xlIjoidXNlciIsImV4cCI6MTc5MTI5OTY5NX0.-VT1oGfDdEH08-pHdUaNjfzGTY_bFTsdHKV8j0r4Iro`
+
+*Note on demo auth:* Anyone can mint any identity via `/auth/token`. In production, this would integrate with an external Identity Provider (OIDC/OAuth2). All endpoints derive user identity solely from the verified JWT `sub` claim—never from the request body.
 
 ## API Reference
+*(Execute with `$API_URL`, `$ADMIN_TOKEN`, and `$ALICE_TOKEN` defined above)*
+
 **Create Show (Admin):**
 ```bash
-curl -X POST http://localhost:8080/shows -H "Authorization: Bearer DEMO_ADMIN_TOKEN" \
+curl -X POST "$API_URL/shows" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Concert","price_paise":2500,"per_user_limit":4,"seats":["A1","A2","B1","B2"]}'
+  -d '{"name":"Concert","price_paise":25000,"per_user_limit":4,"seats":["A1","A2","B1","B2"]}'
 ```
 
 **Get Show State & Summary:**
 ```bash
-curl "http://localhost:8080/shows/{id}?summary=true"
+curl "$API_URL/shows/{id}?summary=true"
 ```
 
 **Reserve Seats:**
 ```bash
-curl -X POST http://localhost:8080/shows/{id}/reserve -H "Authorization: Bearer DEMO_ALICE_TOKEN" \
-  -H "Idempotency-Key: KEY-123" -H "Content-Type: application/json" \
+curl -X POST "$API_URL/shows/{id}/reserve" \
+  -H "Authorization: Bearer $ALICE_TOKEN" \
+  -H "Idempotency-Key: KEY-123" \
+  -H "Content-Type: application/json" \
   -d '{"seats":["A1","A2"]}'
 ```
 
 **Cancel Reservation:**
 ```bash
-curl -X POST http://localhost:8080/reservations/{id}/cancel -H "Authorization: Bearer DEMO_ALICE_TOKEN"
+curl -X POST "$API_URL/reservations/{id}/cancel" \
+  -H "Authorization: Bearer $ALICE_TOKEN"
 ```
 
 ### Errors & Status Codes
@@ -109,7 +129,12 @@ python3 burst.py https://seatsreservation-production.up.railway.app --users 2000
 ```bash
 python3 burst.py https://seatsreservation-production.up.railway.app --users 20000 --hot 2 --seats 500 --concurrency 100 --yes
 ```
-*(On Windows: `python burst.py ...`)*
+
+**Local deployment burst:**
+```bash
+python3 burst.py http://localhost:8080 --users 500 --hot 2 --seats 500 --concurrency 50
+```
+*(On Windows: use `python burst.py ...`)*
 
 - **Scenarios checked:** S1 Hot-seat storm, S2 On-sale mix, S3 Retry storm, S4 Key reuse, S5 Per-user limit, S6 Identity, S7 Cancel and rebook.
 - **Interpreting output:** Displays per-scenario latency percentiles (p50/p95/p99/max), rps, and outcome distributions.
