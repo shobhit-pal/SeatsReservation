@@ -1,7 +1,7 @@
 # Seat Reservation at Scale: Design Spec
 
 Stack: C# / ASP.NET Core 8, Dapper + Npgsql, System.Text.Json, Postgres 16.
-Goal: never double-sell a seat, never exceed the per-user limit, never double-book a retry, and return **zero 5xx** under a ~20k request burst. Graders test the live service, so correctness and operability matter more than polish.
+Goal: never double-sell a seat, never exceed the per-user limit, never double-book a retry, and return **zero 5xx** under a ~20k request burst. High-concurrency testing exercises the live service, so correctness and operability matter above all.
 
 ---
 
@@ -294,7 +294,7 @@ Connection string (dev):
 - Servers x max pool size must stay below Postgres `max_connections`.
 - Min pool gives a warm start. Idle lifetime shrinks the pool after a burst (never below min). Keepalive stops firewalls and hosts from silently killing idle connections. These are different jobs.
 - `ThreadPool.SetMinThreads(200, 200)` at startup. Kestrel body limit set.
-- **Retry transient errors only** (`NpgsqlException`, 40P01, 40001, 57P01) with backoff (50, 100, 200ms and so on), total window about 10 to 20s, below the grader's client timeout. Never retry a 409.
+- **Retry transient errors only** (`NpgsqlException`, 40P01, 40001, 57P01) with backoff (50, 100, 200ms and so on), total window about 10 to 20s, below standard client timeouts. Never retry a 409.
 - An ambiguous commit is safe to retry because the key row makes the retry return the stored 201.
 - **503 only after the window fails**, with `Retry-After`. While the DB is down, taken-filter hits still return 409, and bad input still returns 400/404.
 - Global error handler: bad JSON gives 400, oversize body 413, unknown route 404, wrong method 405, non-UUID id 404, anything else logged and mapped to a domain response.
