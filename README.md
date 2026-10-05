@@ -9,7 +9,7 @@ All reservation decisions execute in a single conditional SQL transaction—no r
 - **Liveness Probe:** `https://seatsreservation-production.up.railway.app/health/live`
 - **Readiness Probe:** `https://seatsreservation-production.up.railway.app/health/ready`
 - **Prometheus Metrics:** `https://seatsreservation-production.up.railway.app/metrics`
-- **Logs Access:** Structured JSON logs with correlation IDs (`X-Request-Id`) streamed in Railway dashboard and stdout.
+- **Logs Access / Recording:** [Live Logs Recording under Burst Load (Google Drive)](https://drive.google.com/file/d/1HBMh00kDHxPPbAOa0XtiICM71X4vy2lc/view?usp=sharing) (Structured JSON logs with correlation IDs streamed in Railway dashboard & stdout)
 
 ## Quick Start (Docker)
 ```bash

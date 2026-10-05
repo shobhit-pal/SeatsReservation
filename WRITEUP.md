@@ -147,11 +147,27 @@ Request ──▶ ShowCache (in-memory metadata)
 
 ### Metrics Exposed (`GET /metrics`)
 - `reservations_confirmed_total`: Monotonic counter of confirmed bookings.
-- `reservations_declined_total{reason="..."}`: Counter of declines partitioned by `seat-taken`, `per-user-limit`, `idempotent-replay`.
+- `reservations_declined_total{reason="..."}`: Counter of declines partitioned by `seat-taken`, `per-user-limit`, `idempotent-replay`, `idempotency-key-reuse`.
 - `reservations_cancelled_total`: Counter of successful cancellations.
 - `seats_available{show_id="..."}`: Gauge of remaining available seats per show.
 - `db_retries_total`: Counter of transient error retries.
 - `db_gate_waiting`: Gauge of requests waiting for database capacity.
+- `taken_filter_hits_total`: Counter of requests rejected in memory without touching the database.
+- `unhandled_exceptions_total`: Counter of unhandled 500 exceptions.
+
+### Structured Correlation Logs & Traffic Heartbeat
+To guarantee full visibility during production bursts without overwhelming stdout or hitting platform rate limits:
+1. **Single-Line JSON Logs:** Every reservation decision and error outputs a structured JSON line carrying: `ts` (UTC), `level`, `request_id` (honoring `X-Request-Id` or generated UUID), `method`, `route` (template `/shows/{id}/reserve`), `status`, `outcome` (e.g. `confirmed`, `seat-taken`, `per-user-limit`, `cancelled`, `internal`), `duration_ms`, `user_id`, `show_id`, and `seat_count`.
+2. **Sampling & Rate Limiting:**
+   - **100% Logged:** Confirmations, cancellations, 5xx internal errors, and 503 database unavailability.
+   - **1-in-100 Sampled:** Repetitive declines (`seat-taken`, `per-user-limit`, `replay`, `validation`, `not-found`) are sampled with `"sampled": true`.
+   - **First-Occurrence Guarantee:** The very first occurrence of every outcome is logged atomically so all status types remain visible.
+   - **100 lines/second Cap:** A per-second emission limiter caps stdout logging to 100 lines/s to prevent Railway from dropping log lines. Errors bypass this cap.
+3. **5-Second Traffic Summary Heartbeat:** A `BackgroundService` ticks every 5 seconds and emits a summary log when traffic occurred:
+   ```json
+   {"event":"traffic_summary","window_s":5,"requests":N,"confirmed":N,"declined":{"seat-taken":N,"per-user-limit":N,"idempotent-replay":N,"idempotency-key-reuse":N},"cancelled":N,"errors_5xx":N,"gate_waiting":N,"db_retries":N,"p95_ms":N}
+   ```
+   Deltas are derived from `AppMetrics`, while `p95_ms` is computed over a fixed 2,048-element lock-free ring buffer array with strictly bounded O(1) memory.
 
 ### Paging Conditions & First Actions
 | Alert Condition | Meaning | First Action to Check |
@@ -166,19 +182,27 @@ Request ──▶ ShowCache (in-memory metadata)
 
 ---
 
-## 7. AI Usage (Directed vs. Decided)
+## 7. Engineering Process & AI Collaboration (Decided vs. Built)
 
-### Directed (What AI Assisted With)
-- **Boilerplate & Scaffolding:** Accelerated repetitive code construction including Dapper repository method stubs, controller HTTP routing, and API error model envelopes.
-- **Client Test Harness:** Rapid prototyping of the single-file `burst.py` script, leveraging Python's `concurrent.futures.ThreadPoolExecutor` and `http.client` for persistent connections.
-- **Observability Configuration:** Streamlined Prometheus metrics formatting in `AppMetrics.cs` and Docker Compose multi-stage build definitions.
+I want to be completely transparent about how this system was engineered: **the core architecture, principles, and trade-offs were designed and specified by me in `docs/design.md`, while the code construction, testing harnesses, and low-level mechanics were built in close pairing with an AI agent.**
 
-### Decided (Engineering Decisions Owned by Human Architecture)
-- **The Core Atomic Decision:** Chose a single conditional SQL statement (`UPDATE seats ... WHERE reservation_id IS NULL`) in PostgreSQL over distributed locks or Redis read-then-write patterns, eliminating race conditions directly at the storage engine level.
-- **Deadlock Avoidance Hierarchy:** Mandated deterministic alphabetical seat sorting (`seats.OrderBy(s => s)`) prior to row updates to ensure strict lock acquisition order during concurrent multi-seat bookings.
-- **All-or-Nothing Semantics:** Enforced that any unavailable seat in a multi-seat reservation triggers a complete database rollback, rejecting partial holds.
-- **Connection Gate Protection:** Sized `Db__GateSize` strictly below PostgreSQL's `Maximum Pool Size` via in-memory semaphore, preventing database connection starvation under stampedes.
-- **Error Classification:** Mapped business declines to 409 status codes and tuned Kestrel timeout limits to guarantee zero 500 errors during burst traffic.
+### What Was Decided by Me (The Architectural Blueprint in `docs/design.md`)
+- **Authority & Consistency Model:** Mandated that PostgreSQL is the sole source of truth (CP model), refusing distributed locks, queues, or Redis read-then-write caching that could lead to double-selling.
+- **The Atomic Conditional SQL Statement:** Specified the single `UPDATE seats SET reservation_id = @id WHERE reservation_id IS NULL` pattern to push race resolution entirely to Postgres row locks.
+- **Strict Invariants:** Established the all-or-nothing multi-seat policy, user quota enforcement via atomic upsert, owner-only cancellation without TTL holds, and idempotent replay semantics.
+- **Tiered Defense Architecture:** Designed the layered defense sequence: static metadata cache $\rightarrow$ idempotency cache $\rightarrow$ in-memory seat ownership filter $\rightarrow$ per-seat async locks $\rightarrow$ database connection admission gate $\rightarrow$ Postgres transaction.
+- **Operational Constraints:** Defined the strict zero-5xx error policy, connection pool sizing rules (`GateSize < MaxPoolSize`), and the build commit milestones.
+
+### How It Was Built with the Agent (Implementation & Iteration)
+- **Codebase Construction:** The agent authored the C# ASP.NET Core 8 implementations, Dapper query definitions, database migrations, and DI wiring following the architectural constraints in `docs/design.md`.
+- **Test Harness Development:** The agent implemented the `burst.py` multi-threaded test client, implementing persistent connection pooling, 7 distinct concurrency stampede scenarios, and post-burst reconciliation checks.
+- **Resilience & Operational Tuning:** When live burst testing on Railway revealed platform-specific hurdles (such as Railway dropping console logs under burst), I directed the agent to address this, and the agent engineered the low-overhead observability mechanics:
+  - Formulating the 3-tier middleware pipeline (`CorrelationIdMiddleware` $\rightarrow$ `RequestLoggingMiddleware` $\rightarrow$ `ErrorHandlingMiddleware`).
+  - Implementing the thread-safe `Interlocked` per-outcome sampling with guaranteed first-seen emission.
+  - Adding the 100 lines/second rate limiter to protect container stdout and Railway ingestion.
+  - Developing the zero-allocation 2,048-element ring buffer for sliding-window p95 calculation in the 5-second traffic summary heartbeat.
+
+This collaborative pairing allowed the project to move with high velocity while maintaining rigorous architectural integrity, provable concurrency correctness, and zero 5xx errors under severe load.
 
 ---
 
