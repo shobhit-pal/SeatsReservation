@@ -25,6 +25,13 @@ DotNetEnv.Env.NoClobber().TraversePath().Load();
 
 var builder = WebApplication.CreateBuilder(args);
 
+// If PORT environment variable is set (Railway, Render, Fly), listen on that port
+var port = Environment.GetEnvironmentVariable("PORT");
+if (!string.IsNullOrEmpty(port))
+{
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+}
+
 // ---------------------------------------------------------------------------
 // 2. Fail fast: both secrets must be present. Named error message helps ops.
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-seats}
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
-    command: postgres -c max_connections=200
+    command: postgres -c max_connections=200 -c shared_buffers=256MB
     volumes:
       - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
       - postgres_data:/var/lib/postgresql/data
@@ -17,6 +17,21 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:-seats};Username=${POSTGRES_USER:-app};Password=${POSTGRES_PASSWORD:-app};Minimum Pool Size=5;Maximum Pool Size=30;Keepalive=15;Connection Idle Lifetime=300;Timeout=60;Command Timeout=30"
+      Db__GateSize: "24"
+      Db__RetryWindowSeconds: "10"
+      Jwt__Secret: ${Jwt__Secret:-dev-only-secret-change-in-prod-min-32-chars}
+      Jwt__ExpiryHours: ${Jwt__ExpiryHours:-24}
+    ports:
+      - "8080:8080"
+    restart: always
 
 volumes:
   postgres_data:

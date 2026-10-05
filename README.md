@@ -14,6 +14,16 @@ Key behaviours:
 
 > **Database Note:** `db/schema.sql` is mounted to `/docker-entrypoint-initdb.d/` in docker compose and executes automatically only on the first start of a fresh volume.
 
+## Run with Docker
+
+```bash
+docker compose up --build
+```
+Then verify readiness:
+```bash
+curl http://localhost:8080/health/ready
+```
+
 ## Burst Testing
 
 Run the high-concurrency burst stampede test:

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start containers
+        run: docker compose up -d --build
+
+      - name: Wait for API ready
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "API is ready after ${i} seconds"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API failed to become ready within 90 seconds"
+          docker compose logs api
+          exit 1
+
+      - name: Run burst stampede test
+        run: python3 burst.py http://localhost:8080 --users 300 --hot 3 --seats 100 --concurrency 100 --yes
+
+      - name: Cleanup and logs
+        if: always()
+        run: |
+          docker compose logs api | tail -100
+          docker compose down -v

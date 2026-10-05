@@ -1,0 +1,9 @@
+.env
+**/bin
+**/obj
+.git
+.agent
+docs
+tools
+*.md
+!README.md
