@@ -593,13 +593,17 @@ class Scenarios:
             raise RuntimeError("S4 setup failed: No successful bookings available from S2/S3 to test key reuse!")
 
         free_seats = self._get_available_general_seats(10)
-        sample_count = min(3, len(success_pool), len(free_seats))
+        # If general pool is completely booked out (e.g. high-volume 20,000 user burst),
+        # fall back to spare private pool seats (indices 16..18) which are never touched by S1-S3, S5, S6, S7
+        s4_spare_seats = self.private_seats[16:19]
+        candidate_seats = free_seats if len(free_seats) >= 3 else s4_spare_seats
+        sample_count = min(3, len(success_pool), len(candidate_seats))
 
         for i in range(sample_count):
             token, u_id, orig_key, orig_seat = success_pool[i]
-            diff_seat = free_seats[i]
-            if diff_seat == orig_seat and len(free_seats) > i + 1:
-                diff_seat = free_seats[i + 1]
+            diff_seat = candidate_seats[i]
+            if diff_seat == orig_seat and len(candidate_seats) > i + 1:
+                diff_seat = candidate_seats[i + 1]
 
             # Reusing key on a different seat -> 409 idempotency-key-reuse
             r = self.client.reserve(token, self.show_id, [diff_seat], orig_key)
