@@ -33,6 +33,12 @@ if (!string.IsNullOrEmpty(port))
     builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 }
 
+builder.Logging.ClearProviders();
+builder.Logging.AddJsonConsole(options =>
+{
+    options.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.ffffffZ ";
+});
+
 // ---------------------------------------------------------------------------
 // 2. Fail fast: both secrets must be present. Named error message helps ops.
 // ---------------------------------------------------------------------------
@@ -117,9 +123,11 @@ builder.Services.AddSingleton(dataSource);
 // 6.3. Resilience services (Retry, Observers) & Metrics
 // ---------------------------------------------------------------------------
 builder.Services.AddSingleton<IAppMetrics, AppMetrics>();
+builder.Services.AddSingleton<ITrafficTracker, TrafficTracker>();
 builder.Services.AddSingleton<IDbRetryObserver, PrometheusDbRetryObserver>();
 builder.Services.AddSingleton<ITransientRetry, TransientRetry>();
 builder.Services.AddHostedService<SeatsAvailableSyncService>();
+builder.Services.AddHostedService<TrafficSummaryBackgroundService>();
 
 // ---------------------------------------------------------------------------
 // 6.4. In-memory layer singletons (ShowCache, TakenFilter, KeyCache, SeatLockManager, DbGate)
@@ -202,6 +210,8 @@ app.Logger.LogInformation(
 // 8. Middleware & Endpoints
 // ---------------------------------------------------------------------------
 
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<RequestLoggingMiddleware>();
 app.UseMiddleware<ErrorHandlingMiddleware>();
 
 app.UseHttpMetrics();
@@ -262,6 +272,12 @@ app.MapGet("/health/ready", async (WarmupService warmup, NpgsqlDataSource db) =>
 
         return Results.Json(new { status = "not-ready", reason = "db-unreachable" }, statusCode: 503);
     }
+});
+
+// Forced 500 test endpoint for error logging and correlation ID verification
+app.MapGet("/debug/throw500", () =>
+{
+    throw new InvalidOperationException("Forced 500 test exception");
 });
 
 // Controllers

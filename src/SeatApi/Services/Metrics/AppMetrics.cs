@@ -105,4 +105,19 @@ public class AppMetrics : IAppMetrics
     {
         _unhandledExceptionsCounter.Inc();
     }
+
+    public MetricsSnapshot GetSnapshot()
+    {
+        return new MetricsSnapshot(
+            Confirmed: (long)_confirmedCounter.Value,
+            DeclinedSeatTaken: (long)_declinedCounter.WithLabels("seat-taken").Value,
+            DeclinedPerUserLimit: (long)_declinedCounter.WithLabels("per-user-limit").Value,
+            DeclinedIdempotentReplay: (long)_declinedCounter.WithLabels("idempotent-replay").Value,
+            DeclinedKeyReuse: (long)_declinedCounter.WithLabels("idempotency-key-reuse").Value,
+            Cancelled: (long)_cancelledCounter.Value,
+            UnhandledExceptions: (long)_unhandledExceptionsCounter.Value,
+            DbGateWaiting: (long)_dbGateWaitingGauge.Value,
+            DbRetries: (long)_dbRetriesCounter.Value
+        );
+    }
 }

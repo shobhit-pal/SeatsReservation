@@ -79,7 +79,7 @@ public class ErrorHandlingMiddleware
     {
         if (context.Response.HasStarted)
         {
-            _logger.LogWarning("Response has already started, unable to write error response for {CorrelationId}", correlationId);
+            _logger.LogWarning("Response has already started, unable to write error response for {request_id}", correlationId);
             return;
         }
 
@@ -101,7 +101,7 @@ public class ErrorHandlingMiddleware
             };
 
             // Log at Warning WITHOUT a stack trace
-            _logger.LogWarning("Bad HTTP request ({StatusCode}) for request {CorrelationId}: {Message}", statusCode, correlationId, badHttpEx.Message);
+            _logger.LogWarning("Bad HTTP request ({StatusCode}) for request {request_id}: {Message}", statusCode, correlationId, badHttpEx.Message);
 
             context.Response.StatusCode = statusCode;
             context.Response.ContentType = "application/json";
@@ -117,7 +117,7 @@ public class ErrorHandlingMiddleware
 
         if (exception is DbUnavailableException or NpgsqlException or TimeoutException)
         {
-            _logger.LogWarning(exception, "Database unavailable for request {CorrelationId}", correlationId);
+            _logger.LogWarning(exception, "Database unavailable for request {request_id}", correlationId);
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             context.Response.Headers.RetryAfter = "2";
             context.Response.ContentType = "application/json";
@@ -132,8 +132,9 @@ public class ErrorHandlingMiddleware
         }
 
         // Only truly unexpected exceptions are logged as Error with stack and increment unhandled metric
+        context.Items["exception_message"] = exception.Message;
         _metrics.RecordUnhandledException();
-        _logger.LogError(exception, "Unhandled exception for request {CorrelationId}", correlationId);
+        _logger.LogError(exception, "Unhandled exception for request {request_id}", correlationId);
         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
         context.Response.ContentType = "application/json";
 

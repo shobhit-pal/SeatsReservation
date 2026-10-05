@@ -13,4 +13,5 @@ public interface IAppMetrics
     void RecordDbRetry();
     void RecordTakenFilterHit();
     void RecordUnhandledException();
+    MetricsSnapshot GetSnapshot();
 }

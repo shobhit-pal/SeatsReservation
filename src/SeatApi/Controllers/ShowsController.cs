@@ -64,8 +64,38 @@ public class ShowsController : ControllerBase
         CancellationToken ct)
     {
         var currentUser = new CurrentUser(HttpContext);
+        HttpContext.Items["user_id"] = currentUser.UserId;
+        HttpContext.Items["show_id"] = id;
+        if (request?.Seats != null)
+        {
+            HttpContext.Items["seat_count"] = request.Seats.Count;
+            HttpContext.Items["seat_labels"] = request.Seats.Take(5).ToArray();
+        }
+
         var result = await _reservationService.ReserveAsync(
             id, request, headerIdempotencyKey, currentUser.UserId, ct);
+
+        string outcome = result.Outcome switch
+        {
+            ReserveResult.OutcomeType.Created => "confirmed",
+            ReserveResult.OutcomeType.Replay => "replay",
+            ReserveResult.OutcomeType.Decline => result.ErrorCode switch
+            {
+                "seat-taken" => "seat-taken",
+                "per-user-limit" => "per-user-limit",
+                "idempotency-key-reuse" => "idempotency-key-reuse",
+                "show-not-found" => "not-found",
+                _ => "validation"
+            },
+            _ => "internal"
+        };
+        HttpContext.Items["outcome"] = outcome;
+
+        if (result.Outcome == ReserveResult.OutcomeType.Created && result.Response?.Seats != null)
+        {
+            HttpContext.Items["seat_count"] = result.Response.Seats.Count;
+            HttpContext.Items["seat_labels"] = result.Response.Seats.Take(5).ToArray();
+        }
 
         return result.Outcome switch
         {
