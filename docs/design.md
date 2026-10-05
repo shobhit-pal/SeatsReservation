@@ -283,8 +283,8 @@ Components:
 
 | Environment | Maximum Pool Size | Db__GateSize | Postgres max_connections |
 |---|---|---|---|
-| Aiven free (testing) | 8 | 6 | 15 |
-| Compose or own VM (graders, live) | 30 | 24 | 200 (set in compose) |
+| Low-resource / Free-tier DB | 8 | 6 | 15 |
+| Compose / Own VM / Production | 30 | 24 | 200 (set in compose) |
 
 > **Note:** All of these values are configuration (connection string and `Db__GateSize` environment variable), never hard-coded.
 
@@ -379,8 +379,4 @@ Then: full-flow test, deploy, test the live URL.
 - Cancel then rebook of the same seat works. Double cancel is a no-op 200.
 - Stop the DB mid-burst: `/health/ready` goes 503, requests wait and retry, and recover when the DB returns.
 - Cold start: restart the app, hit `/health/ready`, then burst immediately.
-
-## 17. WRITEUP.md map
-
-Atomic decision (conditional `UPDATE ... WHERE reservation_id IS NULL`, sorted lock order), idempotency (key table, unique `(user_id, key)`, hash, same-key-different-body), holds and expiry (cancel model, TTL as next step), CP over AP, 2am paging signals (5xx rate, readiness flapping, pool wait time, invariant drift, gauge vs DB mismatch), honest AI usage (directed: schema, lock order, cache rules, decisions; AI-written: boilerplate, to be filled truthfully), next steps (PgBouncer, Redis or pub/sub for multi-instance, shard by show, TTL holds, purge old idempotency rows).
 
