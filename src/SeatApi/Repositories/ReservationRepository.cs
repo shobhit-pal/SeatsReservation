@@ -3,18 +3,24 @@ using System.Text.Json;
 using Dapper;
 using Npgsql;
 using SeatApi.Models;
+using SeatApi.Services.Metrics;
 
 namespace SeatApi.Repositories;
 
 public class ReservationRepository : IReservationRepository
 {
     private readonly NpgsqlDataSource _db;
+    private readonly IAppMetrics _metrics;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
     };
 
-    public ReservationRepository(NpgsqlDataSource db) => _db = db;
+    public ReservationRepository(NpgsqlDataSource db, IAppMetrics metrics)
+    {
+        _db = db;
+        _metrics = metrics;
+    }
 
     public async Task<Show?> GetShowAsync(Guid showId, CancellationToken ct = default)
     {
@@ -215,6 +221,7 @@ public class ReservationRepository : IReservationRepository
 
         // f. Commit transaction and return confirmed response
         await tx.CommitAsync(ct);
+        _metrics.RecordConfirmedReservation(show.Id, sortedSeats.Count);
         return ReserveResult.Created(response, responseJson);
     }
 

@@ -211,7 +211,6 @@ public class ReservationService : IReservationService
                 {
                     _keyCache.Set(userId, key, requestHash, result.StoredJson);
                 }
-                _metrics.RecordConfirmedReservation(show.Id, sortedSeats.Count);
                 break;
 
             case ReserveResult.OutcomeType.Replay:

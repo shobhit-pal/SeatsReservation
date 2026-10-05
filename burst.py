@@ -13,8 +13,8 @@ import http.client
 import json
 import math
 import os
+import queue
 import random
-import re
 import sys
 import threading
 import time
@@ -24,6 +24,12 @@ import uuid
 # Enable ANSI escape sequences on Windows console if supported
 if os.name == "nt":
     os.system("")
+
+# Ensure stdout and stderr flush line-by-line in non-interactive/piped environments
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 COLOR_GREEN = "\033[92m"
 COLOR_RED = "\033[91m"
@@ -39,7 +45,7 @@ def parse_args():
     parser.add_argument("base_url", help="Target API base URL (e.g. http://localhost:5041)")
     parser.add_argument("--users", type=int, default=2000, help="Number of simulated users (default: 2000)")
     parser.add_argument("--hot", type=int, default=5, dest="hot_seats", help="Number of hot seats (default: 5)")
-    parser.add_argument("--seats", type=int, default=500, dest="total_seats", help="Total seats in show (default: 500)")
+    parser.add_argument("--seats", type=int, default=500, dest="total_seats", help="Total seats in show (default: 500, must be >= 40 + hot)")
     parser.add_argument("--concurrency", type=int, default=500, help="Max worker concurrency (default: 500)")
     parser.add_argument("--timeout", type=float, default=60.0, help="HTTP request timeout in seconds (default: 60)")
     parser.add_argument("--yes", "-y", action="store_true", help="Skip safety prompt for non-localhost targets")
@@ -49,6 +55,14 @@ def parse_args():
     parsed = urllib.parse.urlparse(args.base_url)
     if not parsed.scheme or not parsed.netloc:
         sys.stderr.write(f"Error: Invalid BASE_URL '{args.base_url}'. Must include scheme (http:// or https://).\n")
+        sys.exit(1)
+
+    # Validate seat count requirement
+    min_required_seats = 40 + args.hot_seats
+    if args.total_seats < min_required_seats:
+        sys.stderr.write(
+            f"Error: --seats must be at least {min_required_seats} (40 + hot={args.hot_seats}), got {args.total_seats}.\n"
+        )
         sys.exit(1)
 
     host = (parsed.hostname or "").lower()
@@ -73,35 +87,89 @@ def parse_args():
 
 
 # ==== client
-class HttpClient:
-    """Thread-safe HTTP client with persistent per-thread connection pooling."""
+class ConnectionPool:
+    """Fixed-size pool of persistent HTTP/HTTPS connections reused across workers."""
 
-    def __init__(self, base_url: str, timeout: float = 60.0):
+    def __init__(self, scheme: str, host: str, port: int, timeout: float, max_size: int):
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.max_size = max_size
+        self._pool = queue.LifoQueue(maxsize=max_size)
+
+    def _create_connection(self):
+        if self.scheme == "https":
+            return http.client.HTTPSConnection(self.host, self.port, timeout=self.timeout)
+        return http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+
+    def warm(self, endpoint: str = "/health/live"):
+        """Pre-establishes all connections and performs an initial handshake in parallel."""
+        def _warm_one():
+            conn = self._create_connection()
+            try:
+                conn.request("GET", endpoint)
+                resp = conn.getresponse()
+                resp.read()
+            except Exception:
+                pass
+            return conn
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_size, 32)) as tp:
+            conns = list(tp.map(lambda _: _warm_one(), range(self.max_size)))
+        for c in conns:
+            try:
+                self._pool.put_nowait(c)
+            except queue.Full:
+                pass
+
+    def acquire(self):
+        try:
+            return self._pool.get_nowait()
+        except queue.Empty:
+            return self._create_connection()
+
+    def release(self, conn, is_broken: bool = False):
+        if is_broken:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = self._create_connection()
+        try:
+            self._pool.put_nowait(conn)
+        except queue.Full:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+class HttpClient:
+    """Thread-safe HTTP client utilizing a fixed connection pool with latency metrics."""
+
+    def __init__(self, base_url: str, concurrency: int, timeout: float = 60.0):
         self.parsed = urllib.parse.urlparse(base_url)
         self.scheme = self.parsed.scheme.lower()
         self.host = self.parsed.hostname
         self.port = self.parsed.port or (443 if self.scheme == "https" else 80)
         self.path_prefix = self.parsed.path.rstrip("/")
         self.timeout = timeout
-        self._local = threading.local()
 
-    def _get_connection(self, force_new: bool = False):
-        conn = getattr(self._local, "conn", None)
-        if force_new or conn is None:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            if self.scheme == "https":
-                conn = http.client.HTTPSConnection(self.host, self.port, timeout=self.timeout)
-            else:
-                conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
-            self._local.conn = conn
-        return conn
+        # Use a fixed pool of at most min(concurrency, 100) persistent connections
+        self.pool_size = min(concurrency, 100)
+        self.pool = ConnectionPool(self.scheme, self.host, self.port, timeout, self.pool_size)
+
+        self.first_5xx_errors = []
+        self._5xx_lock = threading.Lock()
+
+    def warm_connections(self):
+        """Warm all connections with GET /health/live before benchmark scenarios run."""
+        path = f"{self.path_prefix}/health/live" if self.path_prefix else "/health/live"
+        self.pool.warm(path)
 
     def request(self, method: str, endpoint: str, headers: dict = None, body: any = None):
-        """Sends an HTTP request with per-request latency timing and automatic reconnect on dropped connection."""
+        """Sends an HTTP request using a pooled persistent connection with latency timing."""
         path = f"{self.path_prefix}/{endpoint.lstrip('/')}"
         hdrs = dict(headers) if headers else {}
         body_bytes = None
@@ -117,31 +185,58 @@ class HttpClient:
                 body_bytes = body
 
         start = time.perf_counter()
-        conn = self._get_connection()
+        conn = self.pool.acquire()
+        is_broken = False
         try:
             conn.request(method, path, body=body_bytes, headers=hdrs)
             resp = conn.getresponse()
             raw_data = resp.read().decode("utf-8", errors="replace")
             duration_ms = (time.perf_counter() - start) * 1000.0
+
+            # Capture first 5 responses with 5xx status code
+            if 500 <= resp.status < 600:
+                req_id = resp.getheader("x-request-id") or resp.getheader("X-Request-Id") or "none"
+                with self._5xx_lock:
+                    if len(self.first_5xx_errors) < 5:
+                        self.first_5xx_errors.append({
+                            "status": resp.status,
+                            "body": raw_data[:200].replace("\n", " ").replace("\r", ""),
+                            "request_id": req_id
+                        })
+
             return resp.status, raw_data, duration_ms, False, None
         except (http.client.CannotSendRequest, http.client.RemoteDisconnected,
                 BrokenPipeError, ConnectionResetError):
-            # Connection dropped or stale: reconnect once
+            # Connection dropped or stale: recreate and retry once
+            is_broken = True
             try:
-                conn = self._get_connection(force_new=True)
+                conn = self.pool._create_connection()
                 conn.request(method, path, body=body_bytes, headers=hdrs)
                 resp = conn.getresponse()
                 raw_data = resp.read().decode("utf-8", errors="replace")
                 duration_ms = (time.perf_counter() - start) * 1000.0
+
+                if 500 <= resp.status < 600:
+                    req_id = resp.getheader("x-request-id") or resp.getheader("X-Request-Id") or "none"
+                    with self._5xx_lock:
+                        if len(self.first_5xx_errors) < 5:
+                            self.first_5xx_errors.append({
+                                "status": resp.status,
+                                "body": raw_data[:200].replace("\n", " ").replace("\r", ""),
+                                "request_id": req_id
+                            })
+
+                is_broken = False
                 return resp.status, raw_data, duration_ms, False, None
             except Exception as ex2:
                 duration_ms = (time.perf_counter() - start) * 1000.0
-                self._get_connection(force_new=True)
                 return 0, "", duration_ms, True, str(ex2)
         except Exception as ex:
+            is_broken = True
             duration_ms = (time.perf_counter() - start) * 1000.0
-            self._get_connection(force_new=True)
             return 0, "", duration_ms, True, str(ex)
+        finally:
+            self.pool.release(conn, is_broken=is_broken)
 
     def get_token(self, user_id: str, role: str = "user") -> str:
         status, body, _, is_timeout, err = self.request(
@@ -358,14 +453,15 @@ def compute_stats(outcomes: list, duration_s: float) -> dict:
 class Scenarios:
     def __init__(self, client: HttpClient, pool: concurrent.futures.ThreadPoolExecutor,
                  admin_token: str, users: list, show_id: str,
-                 all_seats: list, hot_seats: list, concurrency: int):
+                 general_seats: list, hot_seats: list, private_seats: list, concurrency: int):
         self.client = client
         self.pool = pool
         self.admin_token = admin_token
         self.users = users
         self.show_id = show_id
-        self.all_seats = all_seats
+        self.general_seats = general_seats
         self.hot_seats = hot_seats
+        self.private_seats = private_seats
         self.concurrency = concurrency
 
         self.confirmed_reservations = {}  # res_id -> seat
@@ -375,28 +471,30 @@ class Scenarios:
         self.all_outcomes = []
         self._lock = threading.Lock()
 
-    def _get_available_seats(self, count: int) -> list:
+    def _get_available_general_seats(self, count: int) -> list:
+        """Gets available seats strictly from general_seats (never private pool)."""
         _, _, _, _, _, seats_list = self.client.get_show_full(self.admin_token, self.show_id)
         with self._lock:
             taken_by_client = set(self.confirmed_reservations.values())
-        free = [s for s, status in seats_list if status == "available" and s not in taken_by_client]
+        free = [
+            s for s, status in seats_list
+            if s in self.general_seats and status == "available" and s not in taken_by_client
+        ]
         return free[:count]
 
     def run_s1(self):
         """S1 Hot-seat storm: concurrency barrier releases waves of users targeting hot seats simultaneously."""
         start = time.perf_counter()
         outcomes = []
-        users_count = min(len(self.users), max(20, self.concurrency // max(1, len(self.hot_seats))))
+        users_count = min(len(self.users), self.concurrency)
 
-        futures = []
         for seat in self.hot_seats:
-            # Barrier releases all users targeting this hot seat at the exact same moment
             barrier = threading.Barrier(users_count)
 
             def task(u_idx, target_seat=seat, b=barrier):
                 user = self.users[u_idx % len(self.users)]
                 key = str(uuid.uuid4())
-                b.wait()  # synchronize release
+                b.wait()
                 res = self.client.reserve(user[1], self.show_id, [target_seat], key)
                 with self._lock:
                     if res["status_code"] == 201 and res["reservation_id"]:
@@ -409,11 +507,9 @@ class Scenarios:
                             res["is_replay"] = True
                     outcomes.append(res)
 
-            for i in range(users_count):
-                futures.append(self.pool.submit(task, i))
-
-        for f in futures:
-            f.result()
+            wave_futures = [self.pool.submit(task, i) for i in range(users_count)]
+            for f in wave_futures:
+                f.result()
 
         duration = time.perf_counter() - start
         with self._lock:
@@ -430,7 +526,7 @@ class Scenarios:
         return "S1 Hot-seat storm", stats, passed, summary
 
     def run_s2_and_s3(self):
-        """S2 On-sale mix + S3 Retry storm: full capacity requests with 20% retry storm sharing keys."""
+        """S2 On-sale mix + S3 Retry storm: full capacity requests with 20% retry storm sharing keys (S1-S4 never touch private_seats)."""
         start = time.perf_counter()
         s2_outcomes = []
         s3_outcomes = []
@@ -442,7 +538,7 @@ class Scenarios:
             if rng.random() < 0.3 and self.hot_seats:
                 seat = rng.choice(self.hot_seats)
             else:
-                seat = rng.choice(self.all_seats)
+                seat = rng.choice(self.general_seats)
             key = str(uuid.uuid4())
             s2_requests.append((user[0], user[1], seat, key))
 
@@ -509,7 +605,7 @@ class Scenarios:
         """S4 Key reuse: reusing idempotency key on a different seat produces 409 idempotency-key-reuse."""
         start = time.perf_counter()
         outcomes = []
-        free_seats = self._get_available_seats(10)
+        free_seats = self._get_available_general_seats(10)
         sample_count = min(3, len(free_seats) // 2)
 
         for i in range(sample_count):
@@ -544,15 +640,16 @@ class Scenarios:
         return "S4 Key reuse", stats, passed, summary
 
     def run_s5(self):
-        """S5 Per-user limit: single user firing parallel reserves cannot exceed per_user_limit (4)."""
+        """S5 Per-user limit: fires exactly 10 parallel reserves from private seat pool; max 4 succeed."""
         start = time.perf_counter()
         outcomes = []
         u_id = "user-limit-s5"
         token = self.client.get_token(u_id)
-        free_seats = self._get_available_seats(10)
+        # S5 uses the first 10 seats of the private pool (never touched by S1-S4)
+        s5_seats = self.private_seats[0:10]
 
         futures = []
-        for seat in free_seats:
+        for seat in s5_seats:
             def task(s=seat):
                 k = str(uuid.uuid4())
                 res = self.client.reserve(token, self.show_id, [s], k)
@@ -587,13 +684,18 @@ class Scenarios:
         user_a = ("user-identity-a", self.client.get_token("user-identity-a"))
         user_b = ("user-identity-b", self.client.get_token("user-identity-b"))
 
-        free_seats = self._get_available_seats(1)
-        seat = free_seats[0] if free_seats else self.all_seats[-1]
+        # Uses private seat at index 10
+        seat = self.private_seats[10]
         key = str(uuid.uuid4())
 
         # 1. Spoofed body user_id
         r1 = self.client.reserve(user_a[1], self.show_id, [seat], key, body_user_id="someone-else")
         outcomes.append(r1)
+
+        if r1["status_code"] != 201:
+            print(f"{COLOR_RED}[FAIL] S6 setup booking failed loudly! Status: {r1['status_code']}, Error: {r1.get('error_code')}, Reason: {r1.get('error_message')}{COLOR_RESET}")
+            raise RuntimeError(f"S6 setup booking failed loudly: status={r1['status_code']}, error={r1.get('error_code')}, reason={r1.get('error_message')}")
+
         identity_preserved = (r1["status_code"] == 201 and r1.get("user_id") == user_a[0])
         res_id = r1.get("reservation_id")
         if res_id:
@@ -637,13 +739,18 @@ class Scenarios:
         user1 = ("user-rebook-1", self.client.get_token("user-rebook-1"))
         user2 = ("user-rebook-2", self.client.get_token("user-rebook-2"))
 
-        free_seats = self._get_available_seats(1)
-        seat = free_seats[0] if free_seats else self.all_seats[-1]
+        # Uses private seat at index 11
+        seat = self.private_seats[11]
         k1 = str(uuid.uuid4())
 
         # 1. User 1 reserves
         r1 = self.client.reserve(user1[1], self.show_id, [seat], k1)
         outcomes.append(r1)
+
+        if r1["status_code"] != 201:
+            print(f"{COLOR_RED}[FAIL] S7 setup booking 1 failed loudly! Status: {r1['status_code']}, Error: {r1.get('error_code')}, Reason: {r1.get('error_message')}{COLOR_RESET}")
+            raise RuntimeError(f"S7 setup booking failed loudly: status={r1['status_code']}, error={r1.get('error_code')}, reason={r1.get('error_message')}")
+
         res_id = r1.get("reservation_id")
         if res_id:
             with self._lock:
@@ -663,6 +770,10 @@ class Scenarios:
         k2 = str(uuid.uuid4())
         r3 = self.client.reserve(user2[1], self.show_id, [seat], k2)
         outcomes.append(r3)
+
+        if r3["status_code"] != 201:
+            print(f"{COLOR_RED}[FAIL] S7 rebook booking failed loudly! Status: {r3['status_code']}, Error: {r3.get('error_code')}, Message: {r3.get('error_message')}{COLOR_RESET}")
+
         if r3["status_code"] == 201 and r3.get("reservation_id"):
             with self._lock:
                 self.confirmed_reservations[r3["reservation_id"]] = seat
@@ -688,7 +799,7 @@ def print_scenario_block(name: str, stats: dict, passed: bool, summary: str):
     print(f"{tag_color}[{tag}]{COLOR_RESET} {name} ({stats['total_requests']} reqs in {stats['total_duration_s']:.2f}s, {stats['rps']:.0f} rps)")
     print(f"  Details:  {summary}")
     print(
-        f"  Outcomes: 201={stats['count_201']}, Replay={stats['count_replay']}, "
+        f"  Outcomes: 201 (distinct)={stats['count_201']}, Replay={stats['count_replay']}, "
         f"409(seat-taken)={stats['count_409_seat_taken']}, "
         f"409(limit)={stats['count_409_per_user_limit']}, "
         f"409(key-reuse)={stats['count_409_key_reuse']}"
@@ -706,38 +817,46 @@ def print_scenario_block(name: str, stats: dict, passed: bool, summary: str):
     )
 
 
-def print_total_distribution(stats: dict, invariant_samples: int, invariant_violations: int):
+def print_total_distribution(stats: dict, invariant_samples: int, invariant_violations: int,
+                             first_5xx_errors: list = None):
     print()
     print("=" * 80)
     print("                           TOTAL OUTCOME DISTRIBUTION                           ")
     print("=" * 80)
-    print(f"Total requests:       {stats['total_requests']}")
-    print(f"Total duration:       {stats['total_duration_s']:.2f}s ({stats['rps']:.0f} req/s)")
-    print(f"201 Confirmed:        {stats['count_201']}")
-    print(f"201 Idempotent Replay:{stats['count_replay']}")
-    print(f"409 seat-taken:       {stats['count_409_seat_taken']}")
-    print(f"409 per-user-limit:   {stats['count_409_per_user_limit']}")
-    print(f"409 key-reuse:        {stats['count_409_key_reuse']}")
+    print(f"Total requests:               {stats['total_requests']}")
+    print(f"Total duration:               {stats['total_duration_s']:.2f}s ({stats['rps']:.0f} req/s)")
+    print(f"201 Confirmed (Distinct IDs): {stats['count_201']}")
+    print(f"201 Idempotent Replays:       {stats['count_replay']}")
+    print(f"409 seat-taken:               {stats['count_409_seat_taken']}")
+    print(f"409 per-user-limit:           {stats['count_409_per_user_limit']}")
+    print(f"409 key-reuse:                {stats['count_409_key_reuse']}")
     if stats["count_409_other"] > 0:
-        print(f"409 other:            {stats['count_409_other']}")
+        print(f"409 other:                    {stats['count_409_other']}")
 
     for sc, count in sorted(stats["other_4xx"].items()):
-        print(f"HTTP {sc}:            {count}")
+        print(f"HTTP {sc}:                    {count}")
 
     if stats["count_5xx"]:
         for sc, count in sorted(stats["count_5xx"].items()):
-            print(f"HTTP {sc} (Errors):    {count}")
+            print(f"HTTP {sc} (Errors):            {count}")
     else:
-        print("5xx Errors:           0")
+        print("5xx Errors:                   0")
 
-    print(f"Timeouts / Connect:   {stats['count_timeouts']}")
+    print(f"Timeouts / Connect:           {stats['count_timeouts']}")
     print(
-        f"Latency (ms):         p50={stats['latency_p50']:.1f} | "
+        f"Latency (ms):                 p50={stats['latency_p50']:.1f} | "
         f"p95={stats['latency_p95']:.1f} | "
         f"p99={stats['latency_p99']:.1f} | "
         f"max={stats['latency_max']:.1f}"
     )
-    print(f"Invariant samples:    {invariant_samples} sampled, {invariant_violations} violations")
+    print(f"Invariant samples:            {invariant_samples} sampled, {invariant_violations} violations")
+
+    if first_5xx_errors:
+        print("-" * 80)
+        print("First 5xx responses (up to 5):")
+        for i, err in enumerate(first_5xx_errors[:5], start=1):
+            print(f"  [{i}] HTTP {err['status']} | X-Request-Id: {err['request_id']} | Body: {err['body']}")
+
     print("=" * 80)
 
 
@@ -862,15 +981,15 @@ def main():
     print(f"Timeout:      {args.timeout:.0f}s")
     print("=" * 80)
 
-    client = HttpClient(args.base_url, timeout=args.timeout)
+    client = HttpClient(args.base_url, concurrency=args.concurrency, timeout=args.timeout)
 
     # 1. Scrape initial metrics
     print("[Setup] Scraping initial baseline metrics...")
     metrics_before = client.get_metrics()
 
-    # 2. Provision admin and simulated user tokens
+    # 2. Provision admin and simulated user tokens (timed separately with rate report)
     print(f"[Setup] Provisioning admin and {args.users} users (batches of 50)...")
-    setup_start = time.perf_counter()
+    token_start = time.perf_counter()
     admin_token = client.get_token("admin-burst", "admin")
 
     users = [None] * args.users
@@ -885,21 +1004,34 @@ def main():
             for idx, u_id, fut in futures:
                 users[idx] = (u_id, fut.result())
 
-    setup_duration = time.perf_counter() - setup_start
-    print(f"[Setup] Tokens provisioned in {setup_duration:.2f}s.")
+    token_duration = time.perf_counter() - token_start
+    total_tokens = args.users + 1
+    token_rate = (total_tokens / token_duration) if token_duration > 0 else 0
+    print(f"[Setup] Tokens provisioned: {total_tokens} tokens in {token_duration:.2f}s ({token_rate:.0f} tokens/s).")
 
-    # 3. Create Show
-    seat_labels = [f"A{n}" for n in range(1, args.total_seats + 1)]
-    hot_seats = seat_labels[:args.hot_seats]
+    # 3. Create Show with General & Private seat pools
+    # Last 20 seats are reserved for S5-S7; S1-S4 only touch general_seats
+    all_seat_labels = [f"A{n}" for n in range(1, args.total_seats + 1)]
+    private_seats = all_seat_labels[-20:]
+    general_seats = all_seat_labels[:-20]
+    hot_seats = general_seats[:args.hot_seats]
+
     timestamp_str = time.strftime("%Y%m%d%H%M%S")
     rand_suffix = uuid.uuid4().hex[:4]
     show_name = f"Burst-Show-{timestamp_str}-{rand_suffix}"
 
     print(f"[Setup] Creating show '{show_name}' with {args.total_seats} seats (per_user_limit=4)...")
-    show_id = client.create_show(admin_token, show_name, 2500, 4, seat_labels)
+    show_id = client.create_show(admin_token, show_name, 2500, 4, all_seat_labels)
     print(f"[Setup] Created show ID: {show_id}")
 
-    # 4. Start Background Invariant Poller
+    # 4. Warm connection pool with GET /health/live before S1
+    print(f"[Setup] Warming {client.pool_size} worker connections with GET /health/live...")
+    warm_start = time.perf_counter()
+    client.warm_connections()
+    warm_duration = time.perf_counter() - warm_start
+    print(f"[Setup] Warmed {client.pool_size} connections in {warm_duration:.2f}s.")
+
+    # 5. Start Background Invariant Poller
     stop_poller = threading.Event()
     invariant_samples = 0
     invariant_violations = 0
@@ -921,7 +1053,7 @@ def main():
     poller_thread = threading.Thread(target=poller_worker, daemon=True)
     poller_thread.start()
 
-    # 5. Run Scenarios
+    # 6. Run Scenarios S1 -> S7
     print()
     print("Running Scenarios S1 -> S7...")
     total_start = time.perf_counter()
@@ -933,8 +1065,9 @@ def main():
             admin_token=admin_token,
             users=users,
             show_id=show_id,
-            all_seats=seat_labels,
+            general_seats=general_seats,
             hot_seats=hot_seats,
+            private_seats=private_seats,
             concurrency=args.concurrency,
         )
 
@@ -963,15 +1096,15 @@ def main():
     stop_poller.set()
     poller_thread.join(timeout=2.0)
 
-    # 6. Total Outcome Distribution
+    # 7. Total Outcome Distribution
     total_stats = compute_stats(scenarios.all_outcomes, total_duration)
     with poller_lock:
         samples = invariant_samples
         violations = invariant_violations
-    print_total_distribution(total_stats, samples, violations)
+    print_total_distribution(total_stats, samples, violations, client.first_5xx_errors)
 
-    # 7. Final Reconciliation
-    time.sleep(1.0)  # brief settle for background sync / metrics
+    # 8. Final Reconciliation
+    time.sleep(1.0)  # settle background sync / metrics
     metrics_after = client.get_metrics()
     final_show_state = client.get_show_summary(admin_token, show_id)
 
