@@ -15,6 +15,7 @@ using SeatApi.Services;
 using SeatApi.Services.Cache;
 using SeatApi.Services.Metrics;
 using SeatApi.Services.Resilience;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Prometheus;
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,7 @@ builder.WebHost.ConfigureKestrel(opts =>
 {
     // Limit request bodies to 4 MB (design.md §10)
     opts.Limits.MaxRequestBodySize = 4_000_000;
+    opts.Limits.MinRequestBodyDataRate = new MinDataRate(bytesPerSecond: 10, gracePeriod: TimeSpan.FromSeconds(30));
     opts.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
     opts.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(120);
     opts.Limits.MaxConcurrentConnections = null;

@@ -48,7 +48,8 @@ public class ErrorHandlingMiddleware
                     await context.Response.WriteAsJsonAsync(new
                     {
                         error = "not-found",
-                        message = "Endpoint not found"
+                        message = "Endpoint not found",
+                        request_id = correlationId.ToString()
                     }, JsonOptions);
                 }
                 else if (context.Response.StatusCode == StatusCodes.Status405MethodNotAllowed &&
@@ -58,10 +59,15 @@ public class ErrorHandlingMiddleware
                     await context.Response.WriteAsJsonAsync(new
                     {
                         error = "method-not-allowed",
-                        message = "Method not allowed"
+                        message = "Method not allowed",
+                        request_id = correlationId.ToString()
                     }, JsonOptions);
                 }
             }
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            // Quiet no-op when client disconnected (no error log, no 500)
         }
         catch (Exception ex)
         {
@@ -71,11 +77,41 @@ public class ErrorHandlingMiddleware
 
     private async Task HandleExceptionAsync(HttpContext context, Exception exception, string correlationId)
     {
-        _metrics.RecordUnhandledException();
-
         if (context.Response.HasStarted)
         {
             _logger.LogWarning("Response has already started, unable to write error response for {CorrelationId}", correlationId);
+            return;
+        }
+
+        if (exception is OperationCanceledException)
+        {
+            // Client disconnect or cancellation: quiet no-op
+            return;
+        }
+
+        if (exception is BadHttpRequestException badHttpEx)
+        {
+            int statusCode = badHttpEx.StatusCode != 0 ? badHttpEx.StatusCode : StatusCodes.Status400BadRequest;
+            string errorSlug = statusCode switch
+            {
+                StatusCodes.Status408RequestTimeout => "request-timeout",
+                StatusCodes.Status413PayloadTooLarge => "payload-too-large",
+                StatusCodes.Status400BadRequest => "bad-request",
+                _ => "bad-request"
+            };
+
+            // Log at Warning WITHOUT a stack trace
+            _logger.LogWarning("Bad HTTP request ({StatusCode}) for request {CorrelationId}: {Message}", statusCode, correlationId, badHttpEx.Message);
+
+            context.Response.StatusCode = statusCode;
+            context.Response.ContentType = "application/json";
+
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = errorSlug,
+                message = badHttpEx.Message,
+                request_id = correlationId
+            }, JsonOptions);
             return;
         }
 
@@ -89,11 +125,14 @@ public class ErrorHandlingMiddleware
             await context.Response.WriteAsJsonAsync(new
             {
                 error = "unavailable",
-                message = "database temporarily unavailable"
+                message = "database temporarily unavailable",
+                request_id = correlationId
             }, JsonOptions);
             return;
         }
 
+        // Only truly unexpected exceptions are logged as Error with stack and increment unhandled metric
+        _metrics.RecordUnhandledException();
         _logger.LogError(exception, "Unhandled exception for request {CorrelationId}", correlationId);
         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
         context.Response.ContentType = "application/json";
@@ -101,7 +140,8 @@ public class ErrorHandlingMiddleware
         await context.Response.WriteAsJsonAsync(new
         {
             error = "internal",
-            message = "An internal error occurred"
+            message = "An internal error occurred",
+            request_id = correlationId
         }, JsonOptions);
     }
 }
